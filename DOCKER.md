@@ -20,22 +20,15 @@
 
 仓库不发布 `latest`。生产应固定版本标签、`sha-*` 标签，或进一步固定 Actions 输出的镜像 digest。
 
-当前推荐版本为 `1.8.9-admin.2`。发布状态和最终 digest 必须以 GitHub Actions 构建摘要为准；该 Package 当前为 private，部署机需要先用仅有 `read:packages` 权限的 GitHub PAT 登录：
+当前推荐版本为 `1.8.9-admin.2`，GitHub Actions Run `31905407093` 已成功；多架构镜像 digest 为 `sha256:3ef37c0cb272a609536fb6088e60e4c59b003be85d167436a3cfea6457388a33`。截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取：
 
 ```bash
-printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
 docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.2
 ```
 
 镜像发布完成后，从 Actions 构建摘要复制 digest，并在生产环境进一步固定为 `ghcr.io/huiyio/freebuff2api-wokers@sha256:...`。
 
-仓库所有者可在 GitHub Package settings 的 Danger Zone 把包改为 Public；该操作不可恢复为 private，必须确认后人工执行。改成 Public 后可以匿名拉取：
-
-```bash
-docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.2
-```
-
-不要把 PAT 写进 `.env`、Compose、Issue 或命令示例。
+如果后续 Package 可见性或组织策略改变，私有包需要使用仅有 `read:packages` 权限的 PAT 登录；不要把 PAT 写进 `.env`、Compose、Issue 或命令示例。
 
 ## 2. Compose 快速部署（推荐）
 
@@ -279,7 +272,7 @@ docker compose up -d --build freebuff2api
 
 发布前工作流执行 `npm ci`、语法检查和完整测试，再构建 amd64/arm64 镜像、SBOM 和 provenance。主标签已存在时工作流拒绝覆盖；`latest` 始终被拒绝。
 
-仓库 Settings -> Actions -> General 中应允许 Actions；工作流文件显式声明了最小的 `contents: read` 和 `packages: write` 权限。首次发布后，在 Package settings 中确认包已连接到本仓库。个人账号的 Package 默认是 private；改为 Public 后可匿名 `docker pull`，而且不能再改回 private。
+仓库 Settings -> Actions -> General 中应允许 Actions；工作流文件显式声明了最小的 `contents: read` 和 `packages: write` 权限。首次发布后，在 Package settings 中确认包已连接到本仓库。当前 Package 已验证为 Public，可匿名 `docker pull`；若组织策略改变可见性，再使用最小权限 PAT。
 
 ## 10. 安全与责任边界
 
@@ -293,7 +286,7 @@ docker compose up -d --build freebuff2api
 ## 11. 常见问题
 
 - `manifest unknown`：标签尚未发布，或 `.env` 中标签拼写错误；到 Actions 构建摘要确认精确引用。
-- `denied` / `unauthorized`：GHCR 包仍为 private，先登录或由所有者改成 Public。
+- `denied` / `unauthorized`：先核对标签和 Package 当前可见性；若组织策略已改为 private，再用仅有 `read:packages` 权限的 PAT 登录。
 - `ACCOUNT_STORE_KEY verification failed`：数据库与主密钥不匹配；立即停用该实例，恢复配套密钥，不要覆盖数据库。
 - 管理端登录信息没随 `.env` 改变：这是预期行为；初始化后账号、密码和 API Key 以 SQLite 当前值为准。
 - 启用账号提示缺少代理：严格模式要求每个启用账号有自己的代理；也可在明确接受直连风险后设置 `REQUIRE_ACCOUNT_PROXY=false`。

@@ -118,7 +118,7 @@ Node 管理侧：
 
 模型目录和额度属于上游动态信息。README 当前按官方完整访问模式和实测快照描述，不能作为 SLA；真实额度、地区、资格和模型开放状态必须在部署时用专用测试账号重新确认。
 
-## 8. 验证记录（本地、未使用真实上游凭据）
+## 8. 验证记录（未使用真实上游账号凭据）
 
 截至 2026-08-16：
 
@@ -130,24 +130,29 @@ Node 管理侧：
 - Wrangler `4.123.0` dry-run：通过，约 87.7 KiB，gzip 约 20.2 KiB，无 bindings。
 - 2026-08-16 匿名上游协议检查：授权码接口返回 200、字段与链接域名/路径符合预期，未登录状态查询返回 401 JSON；未使用或输出任何账号凭据。
 - 已完成真实管理端登录、账号列表和预览 UI 检查，预览使用合成账号；没有读取或发送真实 Token。
+- Playwright 桌面/390px 移动端检查：授权按钮自动启动、延迟响应关闭弹窗后任务仍复用、明确“取消授权”才发送 DELETE，页面无横向溢出。
 - 本机没有 Docker/Compose，因此本地未 build 或启动镜像；多架构镜像由 GitHub Actions 在 Linux runner 上构建，运行结果和 digest 应以 Actions/GHCR 记录为准。
 - GitHub Actions 版本构建 [Run 31893248200](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31893248200) 成功：`ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1`，digest `sha256:6f36e3502497637ac8120cdf98ccbfca25169effb58798a6fcacd82449a1241c`，包含 amd64/arm64、SBOM 和 provenance。
 - GitHub Actions 分支构建 [Run 31893248217](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31893248217) 成功：`sha-7043f800c93f`，digest `sha256:63083a709a37bfb01600fe7c90989ccc6b90c5cfa91929673442fb3c767d188d`；分支便利标签同步发布。
-- GHCR Package 当前为 private，未登录的 registry manifest 请求返回 `401`。部署机可先用 `read:packages` PAT 登录；如需匿名拉取，仓库所有者必须在 Package settings 人工确认不可逆的 Public 切换。
+- GitHub Actions 最终分支构建 [Run 31905293846](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31905293846) 成功，对应提交 `80a4563a16cb16b1b0f193e47accee30e6611560`。
+- GitHub Actions 版本构建 [Run 31905407093](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31905407093) 成功：`ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.2`，digest `sha256:3ef37c0cb272a609536fb6088e60e4c59b003be85d167436a3cfea6457388a33`，包含 amd64/arm64、SBOM 和 provenance；匿名 registry manifest 请求返回 200。
+- 非 Docker 服务器已部署：`/opt/freebuff2api/current -> /opt/freebuff2api/releases/80a4563`，旧版本 `/opt/freebuff2api/releases/003d2d8` 保留；备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260815T200547Z` 与对应环境文件。Node `v24.19.0`、systemd `freebuff2api.service`、管理层 `1.8.9-admin.2` 验证通过。
+- 服务器验收：健康 200、无 Key 的 `/v1/models` 返回 401、管理页 200、未登录管理 API 返回 401；管理员登录后系统显示严格代理开启、账号数 0。匿名授权任务真实走通 `201 -> pending -> cancelled`，没有登录真实账号或保存 Token。
+- 当前服务器管理端仍明文监听 `0.0.0.0:8788`，公网授权前必须改用 HTTPS 反向代理或 SSH 隧道；此前通过聊天暴露的服务器登录密码待轮换。
 - 没有使用真实 Freebuff 凭据做 session/chat 端到端测试；上游 `banned` 行为和额度仍未验证。
 
 ## 9. 后续操作顺序
 
-1. 在有 Docker 的目标机拉取已发布 GHCR 镜像，执行一次性导入和 Compose 启动，验证卷权限、管理员登录和代理测试。
-2. 用一个专用、获授权的测试账号做一次真实 `/v1/models`、流式 chat 和非流式 chat；记录脱敏状态码，不把 Token 放入日志。
-3. 每次发布前检查 `git status --short`、`git diff --check`、敏感文件和 `package-lock.json`；给可部署提交打本地回退标签。
-4. 生产升级遵循 `UPSTREAM_SYNC.md`：先备份 SQLite 和 `ACCOUNT_STORE_KEY`，使用不可变镜像标签，保留旧镜像和回滚 Git 标签。
-5. 上游更新时逐段审查 `worker.js`，尤其是 session gate、模型映射、SSE、代理入口和账号代次，不要整文件覆盖本分支。
+1. 为服务器管理端配置 HTTPS 反向代理或 SSH 隧道，并轮换此前暴露的服务器登录密码。
+2. 在管理页点击“授权账号”，完成自己的 Codebuff/Freebuff 登录；授权完成后为账号配置独立代理并启用。
+3. 用一个专用、获授权的测试账号做一次真实 `/v1/models`、流式 chat 和非流式 chat；记录脱敏状态码，不把 Token 放入日志。
+4. 每次发布前检查 `git status --short`、`git diff --check`、敏感文件和 `package-lock.json`；给可部署提交打本地回退标签。
+5. 生产升级遵循 `UPSTREAM_SYNC.md`：先备份 SQLite 和 `ACCOUNT_STORE_KEY`，使用不可变镜像标签，保留旧镜像和回滚 Git 标签。
+6. 上游更新时逐段审查 `worker.js`，尤其是 session gate、模型映射、SSE、代理入口和账号代次，不要整文件覆盖本分支。
 
 ## 10. 当前未完成事项
 
-- 功能分支尚未合并到 `main`；本次授权竞态修复和非 Docker 部署文档待提交后部署。
+- 功能分支尚未合并到 `main`；`v1.8.9-admin.2` 已发布并部署到非 Docker 服务器。
 - 未在本机实际构建 Docker 镜像（环境缺少 Docker CLI）。
-- GHCR Package 尚未改为 Public；匿名 `docker pull` 前仍需一次人工确认，或继续使用 `docker login ghcr.io`。
+- 尚未用真实账号验证上游 session/chat/额度；也未承诺固定模型额度或解除封禁。
 - 未实现跨 Cloudflare isolate 的全局账号协调；当前 Worker 仍是 isolate-local 状态。
-- 未承诺任何模型的固定额度或绕过封禁能力。

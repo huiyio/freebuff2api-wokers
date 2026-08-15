@@ -150,7 +150,7 @@ ghcr.io/huiyio/freebuff2api-wokers
 
 当前 Compose 默认固定不可变版本 `1.8.9-admin.2`，支持 `linux/amd64` 和 `linux/arm64`。仓库不发布 `latest`；升级和回滚应使用版本标签、`sha-<提交前12位>` 标签或镜像 digest。可变的 `branch-codex-per-account-proxy` 只用于临时试用。
 
-截至 2026-08-15，该 GHCR Package 为 private。首次在部署机使用时先执行 `docker login ghcr.io`（PAT 只授予 `read:packages`）；如果仓库所有者以后在 Package settings 人工确认改为 Public，则可以跳过登录。Public 切换不可恢复为 private。
+截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取；`1.8.9-admin.2` 的多架构 digest 为 `sha256:3ef37c0cb272a609536fb6088e60e4c59b003be85d167436a3cfea6457388a33`。如果后续可见性改变，私有包才需要 `read:packages` PAT 登录，且不要把 PAT 写入配置或日志。
 
 #### 直接使用 GitHub 构建镜像
 
@@ -211,7 +211,7 @@ docker compose up -d --build freebuff2api
 - 发布前运行语法检查和完整测试，再构建 amd64/arm64 镜像、SBOM 与 provenance；
 - 已存在的主标签和 `latest` 都会被拒绝。
 
-首次发布后，仓库所有者需要在 GitHub Package settings 中确认镜像包为 Public，才能匿名 `docker pull`；private 包需要先登录 GHCR。详细发布与权限说明见 [`DOCKER.md`](DOCKER.md#9-github-actions-发布流程维护者)。
+当前镜像包已验证为 Public，可匿名 `docker pull`；若 GitHub 组织策略改变可见性，详细权限说明见 [`DOCKER.md`](DOCKER.md#9-github-actions-发布流程维护者)。
 
 ### Cloudflare Worker 部署（❌ 不推荐）
 
