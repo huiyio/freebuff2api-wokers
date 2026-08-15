@@ -5,7 +5,7 @@
 > 🎉 欢迎使用与交流！有任何问题或想法欢迎提 Issue / PR。
 > 开源协议：**[AGPL-3.0](#-license)**
 
-把 **freebuff/codebuff** 的免费模型暴露成 **OpenAI-compatible API**。单文件无依赖，**推荐 Docker 容器部署**（或自建 VPS 运行），适配任意 OpenAI SDK / 客户端（QwenPaw、Hermes、ChatGPT-Next-Web、LobeChat、one-api 等）。
+把 **freebuff/codebuff** 的模型接口适配为 **OpenAI-compatible API**。`worker.js` 核心仍可单文件运行；Web 账号管理、加密 SQLite 和每账号代理属于 Node 多文件运行层，**推荐 Docker 容器或 Node/systemd VPS 部署**，适配常见 OpenAI SDK / 客户端（QwenPaw、Hermes、ChatGPT-Next-Web、LobeChat、one-api 等）。
 
 > ⚖️ **使用前必读**：本项目是独立开源软件，不代表或受 Freebuff/Codebuff、Cloudflare、OpenAI、Anthropic、Docker 或 GitHub 授权。使用者必须拥有账号、Token、代理和请求数据的合法授权，并自行遵守上游条款、隐私义务和所在地法律。请先阅读 [使用与责任声明](LEGAL_NOTICE.md)、[责任划分](RESPONSIBILITIES.md)、[变更与回滚流程](CHANGE_CONTROL.md)、[安全策略](SECURITY.md) 和 [第三方归属](NOTICE.md)。
 
@@ -21,7 +21,7 @@
 - 🧩 **OpenAI 兼容**：`/v1/models`、`/v1/chat/completions`、`/v1/responses`（流式/非流式视接口支持情况而定）
 - 📨 **Anthropic Messages API**：支持 `/v1/messages`、`/messages` 及对应的 `count_tokens` 路由，可供 Anthropic SDK / 兼容客户端尝试接入
 - ❤️ **健康检查**：`GET /healthz`（免鉴权），方便监控探活
-- 📦 **单文件部署**：无依赖，`worker.js` 一处代码，CF / Docker / VPS 通用
+- 📦 **两种运行层**：`worker.js` 可单文件部署；完整管理版需要 Node 24、npm 依赖和仓库内管理/迁移文件
 
 ## 📨 Anthropic Messages API 支持
 
@@ -79,10 +79,10 @@ Worker 通过 Cloudflare Workers 访问 Freebuff，上游通常会将请求识�
 
 ```bash
 curl https://你的worker.workers.dev/healthz
-# {"status":"ok","version":"1.4.0","time":"..."}
+# {"status":"ok","version":"1.8.9","time":"..."}
 ```
 
-- `version` 字段=当前部署的版本号，**每次部署版本号都会变化**，用于确认线上是否已更新（CF 边缘缓存有延迟，验证时等几秒或加随机参数）
+- `version` 是 `worker.js` 的协议版本，不足以证明 Node 管理层已升级；非 Docker 部署还应核对 `current` symlink，登录管理端后查看 `/admin/api/system` 的 `appVersion`
 - 适合接入 UptimeRobot / 自建监控探活
 
 ## 🔑 获取 FREEBUFF_TOKEN
@@ -184,6 +184,7 @@ socks5h://username:password@host:port
 完整文档：
 
 - [Docker 完整部署、旧账号导入、HTTPS、备份与回滚](DOCKER.md)
+- [非 Docker Node/systemd 服务器部署](NON_DOCKER.md)
 - [上游同步与生产升级流程](UPSTREAM_SYNC.md)
 - [责任划分](RESPONSIBILITIES.md) 和 [变更审批](CHANGE_CONTROL.md)
 

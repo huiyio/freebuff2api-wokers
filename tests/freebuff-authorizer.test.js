@@ -28,6 +28,7 @@ function fixture(responses, options = {}) {
     },
     async create(input, actor) {
       created.push({ input, actor });
+      if (options.createGate) await options.createGate;
       if (options.createError) throw options.createError;
       const id = 'account-' + created.length;
       const account = {
@@ -44,6 +45,7 @@ function fixture(responses, options = {}) {
     },
     async delete(id, actor) {
       deleted.push({ id, actor });
+      if (options.deleteError) throw options.deleteError;
       activeAccounts.delete(id);
     },
   };
@@ -333,4 +335,105 @@ test('parallel polls share one upstream request and one account write', async ()
   assert.equal(setup.activeAccounts.size, 1);
   assert.equal(setup.created.length, 1);
   assert.equal(setup.requests.filter((request) => new URL(request.url).pathname.endsWith('/api/auth/cli/status')).length, 1);
+});
+
+test('does not keep an account when persistence crosses the authorization deadline', async () => {
+  let releaseCreate;
+  const createGate = new Promise((resolve) => { releaseCreate = resolve; });
+  const setup = fixture([
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=one-time-code',
+      fingerprintHash: 'fingerprint-hash-value',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+    jsonResponse(200, { user: { email: 'late@example.com', authToken: 'late-token-12345' } }),
+  ], { pollTimeoutMs: 5_000, createGate });
+  const started = await setup.authorizer.start(session);
+  await nextTick();
+  const polling = setup.authorizer.poll(started.authorization.id, session);
+  while (setup.created.length === 0) await nextTick();
+  setup.advance(5_001);
+  releaseCreate();
+  const result = await polling;
+  assert.equal(result.authorization.status, 'expired');
+  assert.equal(setup.deleted.length, 1);
+  assert.equal(setup.activeAccounts.size, 0);
+});
+
+test('cancels and rolls back an account write already in progress', async () => {
+  let releaseCreate;
+  const createGate = new Promise((resolve) => { releaseCreate = resolve; });
+  const setup = fixture([
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=one-time-code',
+      fingerprintHash: 'fingerprint-hash-value',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+    jsonResponse(200, { user: { email: 'cancel-late@example.com', authToken: 'cancel-late-token-12345' } }),
+  ], { createGate });
+  const started = await setup.authorizer.start(session);
+  await nextTick();
+  const polling = setup.authorizer.poll(started.authorization.id, session);
+  while (setup.created.length === 0) await nextTick();
+  const cancelling = setup.authorizer.cancel(started.authorization.id, session);
+  await nextTick();
+  releaseCreate();
+  const [polled, cancelled] = await Promise.all([polling, cancelling]);
+  assert.equal(polled.authorization.status, 'cancelled');
+  assert.equal(cancelled.authorization.status, 'cancelled');
+  assert.equal(setup.deleted.length, 1);
+  assert.equal(setup.activeAccounts.size, 0);
+});
+
+test('reports a failed terminal result when interrupted-account rollback fails', async () => {
+  let releaseCreate;
+  const createGate = new Promise((resolve) => { releaseCreate = resolve; });
+  const setup = fixture([
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=one-time-code',
+      fingerprintHash: 'fingerprint-hash-value',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+    jsonResponse(200, { user: { email: 'rollback-failed@example.com', authToken: 'rollback-failed-token-12345' } }),
+  ], { createGate, deleteError: new Error('delete failed') });
+  const started = await setup.authorizer.start(session);
+  await nextTick();
+  const polling = setup.authorizer.poll(started.authorization.id, session);
+  while (setup.created.length === 0) await nextTick();
+  const cancelling = setup.authorizer.cancel(started.authorization.id, session);
+  releaseCreate();
+  const [polled, cancelled] = await Promise.all([polling, cancelling]);
+  assert.equal(polled.authorization.status, 'failed');
+  assert.equal(cancelled.authorization.status, 'failed');
+  assert.equal(setup.deleted.length, 1);
+  assert.equal(setup.activeAccounts.size, 1);
+});
+
+test('blocks new authorizations while all revoked sessions are being drained', async () => {
+  let releaseCreate;
+  const createGate = new Promise((resolve) => { releaseCreate = resolve; });
+  const setup = fixture([
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=one-time-code',
+      fingerprintHash: 'fingerprint-hash-value',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+    jsonResponse(200, { user: { email: 'revoked@example.com', authToken: 'revoked-token-12345' } }),
+  ], { createGate });
+  const started = await setup.authorizer.start(session);
+  await nextTick();
+  const polling = setup.authorizer.poll(started.authorization.id, session);
+  while (setup.created.length === 0) await nextTick();
+  const revoking = setup.authorizer.cancelAll();
+  await assert.rejects(
+    setup.authorizer.start({ sessionHash: 'session-b', actor: 'admin', expiresAt: 2_000 }),
+    (error) => error instanceof FreebuffAuthorizationError
+      && error.code === 'FREEBUFF_AUTH_REVOCATION_IN_PROGRESS'
+      && error.status === 503,
+  );
+  releaseCreate();
+  const [polled, revoked] = await Promise.all([polling, revoking]);
+  assert.equal(polled.authorization.status, 'cancelled');
+  assert.equal(revoked.cancelled, 1);
+  assert.equal(setup.activeAccounts.size, 0);
 });

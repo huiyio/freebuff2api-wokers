@@ -172,3 +172,66 @@ test('rejects invalid first-run administrator credentials', async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('revokes sessions and changes the password before an external authorization cleanup hook completes', async () => {
+  const fixture = await authFixture();
+  let releaseCleanup;
+  let cleanupStarted;
+  const cleanupGate = new Promise((resolve) => { releaseCleanup = resolve; });
+  const cleanupStartedGate = new Promise((resolve) => { cleanupStarted = resolve; });
+  try {
+    const login = await fixture.auth.login('initial-admin', 'initial-admin-password', 'cleanup-test');
+    const cookieHeader = login.cookies.map((value) => value.split(';', 1)[0]).join('; ');
+    const request = new Request('http://local/admin/api/session', { headers: { cookie: cookieHeader } });
+    const changing = fixture.auth.changePassword(
+      'initial-admin-password',
+      'next-admin-password',
+      fixture.auth.requireSession(request),
+      {
+        afterSessionRevocation: async () => {
+          cleanupStarted();
+          await cleanupGate;
+        },
+      },
+    );
+    await cleanupStartedGate;
+    assert.equal(fixture.auth.authenticate(request), null);
+    await assert.rejects(
+      fixture.auth.login('initial-admin', 'initial-admin-password', 'old-password'),
+      (error) => error instanceof AdminAuthError && error.code === 'ADMIN_UNAUTHORIZED',
+    );
+    const newLogin = await fixture.auth.login('initial-admin', 'next-admin-password', 'new-password');
+    assert.equal(newLogin.username, 'initial-admin');
+    releaseCleanup();
+    await changing;
+  } finally {
+    releaseCleanup?.();
+    await fixture.close();
+  }
+});
+
+test('serializes concurrent password changes and rejects a stale authenticated session', async () => {
+  const fixture = await authFixture();
+  try {
+    const login = await fixture.auth.login('initial-admin', 'initial-admin-password', 'password-race');
+    const cookieHeader = login.cookies.map((value) => value.split(';', 1)[0]).join('; ');
+    const request = new Request('http://local/admin/api/password', { headers: { cookie: cookieHeader } });
+    const sessionForFirst = fixture.auth.requireSession(request);
+    const sessionForSecond = fixture.auth.requireSession(request);
+    const first = fixture.auth.changePassword('initial-admin-password', 'first-next-password', sessionForFirst);
+    const second = fixture.auth.changePassword('initial-admin-password', 'second-next-password', sessionForSecond);
+    const [firstResult, secondResult] = await Promise.allSettled([first, second]);
+    assert.equal(firstResult.status, 'fulfilled');
+    assert.equal(secondResult.status, 'rejected');
+    assert.equal(secondResult.reason instanceof AdminAuthError, true);
+    assert.equal(secondResult.reason.code, 'ADMIN_UNAUTHORIZED');
+    const accepted = await fixture.auth.login('initial-admin', 'first-next-password', 'winning-password');
+    assert.equal(accepted.username, 'initial-admin');
+    await assert.rejects(
+      fixture.auth.login('initial-admin', 'second-next-password', 'losing-password'),
+      (error) => error instanceof AdminAuthError && error.code === 'ADMIN_UNAUTHORIZED',
+    );
+  } finally {
+    await fixture.close();
+  }
+});

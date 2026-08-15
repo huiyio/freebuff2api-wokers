@@ -17,7 +17,25 @@ const state = {
   authorizationEpoch: 0,
   authorizationClosing: false,
   sessionEpoch: 0,
+  logoutPending: false,
+  resourceRequests: {
+    accounts: { sequence: 0, controller: null },
+    audit: { sequence: 0, controller: null },
+    system: { sequence: 0, controller: null },
+    apiKey: { sequence: 0, controller: null },
+  },
 };
+
+const AUTHORIZATION_STATUSES = new Set([
+  'starting',
+  'pending',
+  'completing',
+  'completed',
+  'cancelled',
+  'expired',
+  'duplicate',
+  'failed',
+]);
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -76,6 +94,7 @@ function closeDialog(id) {
 }
 
 function clearAdminPresentation() {
+  invalidateResourceRequests();
   state.accounts = [];
   state.audit = [];
   state.system = {};
@@ -99,6 +118,40 @@ function clearAdminPresentation() {
   $('#api-key-output').value = '';
   $('#api-key-reveal').classList.add('hidden');
   ['account-dialog', 'delete-dialog', 'password-dialog', 'api-key-confirm-dialog'].forEach(closeDialog);
+}
+
+function invalidateResourceRequests() {
+  for (const requestState of Object.values(state.resourceRequests)) {
+    requestState.sequence += 1;
+    requestState.controller?.abort();
+    requestState.controller = null;
+  }
+}
+
+function beginResourceRequest(name) {
+  const requestState = state.resourceRequests[name];
+  requestState.sequence += 1;
+  requestState.controller?.abort();
+  const controller = new AbortController();
+  requestState.controller = controller;
+  return {
+    name,
+    sequence: requestState.sequence,
+    sessionEpoch: state.sessionEpoch,
+    controller,
+  };
+}
+
+function isCurrentResourceRequest(request) {
+  const requestState = state.resourceRequests[request.name];
+  return request.sessionEpoch === state.sessionEpoch
+    && request.sequence === requestState.sequence
+    && request.controller === requestState.controller;
+}
+
+function finishResourceRequest(request) {
+  const requestState = state.resourceRequests[request.name];
+  if (requestState.controller === request.controller) requestState.controller = null;
 }
 
 function clearAuthorizationPolling() {
@@ -140,6 +193,8 @@ function showLogin() {
   state.username = '';
   $('#app-shell').classList.add('hidden');
   $('#login-view').classList.remove('hidden');
+  $('#login-form button[type="submit"]').disabled = state.logoutPending;
+  if (state.logoutPending) $('#login-error').textContent = '正在安全退出当前会话';
   $('#login-username').focus();
 }
 
@@ -244,24 +299,27 @@ function renderAccounts() {
 }
 
 async function loadAccounts({ quiet = false } = {}) {
-  const sessionEpoch = state.sessionEpoch;
+  const request = beginResourceRequest('accounts');
   try {
-    const payload = await api('/accounts');
-    if (sessionEpoch !== state.sessionEpoch) return;
+    const payload = await api('/accounts', { signal: request.controller.signal });
+    if (!isCurrentResourceRequest(request)) return;
     state.accounts = payload.accounts || [];
     renderAccounts();
     $('#accounts-updated').textContent = `更新于 ${new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date())}`;
   } catch (error) {
+    if (!isCurrentResourceRequest(request) || error.name === 'AbortError') return;
     if (error.status === 401) return showLogin();
     if (!quiet) toast(error.message, 'error');
+  } finally {
+    finishResourceRequest(request);
   }
 }
 
 async function loadAudit() {
-  const sessionEpoch = state.sessionEpoch;
+  const request = beginResourceRequest('audit');
   try {
-    const payload = await api('/audit?limit=100');
-    if (sessionEpoch !== state.sessionEpoch) return;
+    const payload = await api('/audit?limit=100', { signal: request.controller.signal });
+    if (!isCurrentResourceRequest(request)) return;
     state.audit = payload.entries || [];
     $('#audit-table-body').innerHTML = state.audit.map((entry) => `
       <tr>
@@ -272,16 +330,19 @@ async function loadAudit() {
       </tr>
     `).join('');
   } catch (error) {
+    if (!isCurrentResourceRequest(request) || error.name === 'AbortError') return;
     if (error.status === 401) return showLogin();
     toast(error.message, 'error');
+  } finally {
+    finishResourceRequest(request);
   }
 }
 
 async function loadSystem() {
-  const sessionEpoch = state.sessionEpoch;
+  const request = beginResourceRequest('system');
   try {
-    const payload = await api('/system');
-    if (sessionEpoch !== state.sessionEpoch) return;
+    const payload = await api('/system', { signal: request.controller.signal });
+    if (!isCurrentResourceRequest(request)) return;
     state.system = payload.system || {};
     $('#system-version').textContent = state.system.appVersion || '-';
     $('#worker-version').textContent = state.system.workerVersion || '-';
@@ -291,8 +352,11 @@ async function loadSystem() {
     $('#system-routes').textContent = `HTTP ${kinds.http || 0} · HTTPS ${kinds.https || 0} · SOCKS5 ${kinds.socks5 || 0}`;
     $('#sidebar-version').textContent = state.system.appVersion || '管理控制台';
   } catch (error) {
+    if (!isCurrentResourceRequest(request) || error.name === 'AbortError') return;
     if (error.status === 401) return showLogin();
     toast(error.message, 'error');
+  } finally {
+    finishResourceRequest(request);
   }
 }
 
@@ -304,14 +368,17 @@ function renderApiKeyInfo(info = {}) {
 }
 
 async function loadApiKey() {
-  const sessionEpoch = state.sessionEpoch;
+  const request = beginResourceRequest('apiKey');
   try {
-    const payload = await api('/api-key');
-    if (sessionEpoch !== state.sessionEpoch) return;
+    const payload = await api('/api-key', { signal: request.controller.signal });
+    if (!isCurrentResourceRequest(request)) return;
     renderApiKeyInfo(payload.apiKey || {});
   } catch (error) {
+    if (!isCurrentResourceRequest(request) || error.name === 'AbortError') return;
     if (error.status === 401) return showLogin();
     toast(error.message, 'error');
+  } finally {
+    finishResourceRequest(request);
   }
 }
 
@@ -577,7 +644,13 @@ function authorizationMessage(authorization) {
 }
 
 function normalizeAuthorization(value) {
-  if (!value || typeof value !== 'object' || typeof value.id !== 'string' || !value.id || typeof value.status !== 'string') {
+  if (
+    !value
+    || typeof value !== 'object'
+    || typeof value.id !== 'string'
+    || !value.id
+    || !AUTHORIZATION_STATUSES.has(value.status)
+  ) {
     throw new Error('授权状态无效');
   }
   const authorization = {
@@ -645,6 +718,7 @@ function scheduleAuthorizationPoll(epoch = state.authorizationEpoch) {
 
 async function startAuthorization() {
   const epoch = state.authorizationEpoch;
+  const sessionEpoch = state.sessionEpoch;
   if (!isCurrentAuthorizationFlow(epoch) || state.authorization) return;
   const button = $('#authorization-start-button');
   button.disabled = true;
@@ -657,8 +731,22 @@ async function startAuthorization() {
       body: '{}',
       signal: controller.signal,
     });
-    if (!isCurrentAuthorizationFlow(epoch)) return;
-    state.authorization = normalizeAuthorization(payload.authorization);
+    const authorization = normalizeAuthorization(payload.authorization);
+    if (!isCurrentAuthorizationFlow(epoch)) {
+      const dialog = $('#account-authorization-dialog');
+      if (
+        sessionEpoch === state.sessionEpoch
+        && !dialog.open
+        && isAuthorizationActive(authorization)
+      ) {
+        void api('/account-authorizations/' + encodeURIComponent(authorization.id), {
+          method: 'DELETE',
+          body: '{}',
+        }).catch(() => {});
+      }
+      return;
+    }
+    state.authorization = authorization;
     renderAuthorizationDialog();
     scheduleAuthorizationPoll(epoch);
   } catch (error) {
@@ -730,11 +818,29 @@ async function closeAuthorizationDialog() {
     const controller = new AbortController();
     state.authorizationController = controller;
     try {
-      await api('/account-authorizations/' + encodeURIComponent(authorization.id), {
+      const payload = await api('/account-authorizations/' + encodeURIComponent(authorization.id), {
         method: 'DELETE',
         body: '{}',
         signal: controller.signal,
       });
+      if (state.authorizationEpoch !== epoch) return;
+      const result = normalizeAuthorization(payload.authorization);
+      state.authorization = result;
+      if (!['cancelled', 'expired'].includes(result.status)) {
+        state.authorizationClosing = false;
+        renderAuthorizationDialog();
+        if (result.status === 'completed') {
+          toast('授权已在取消前完成，账号已保存');
+        } else {
+          $('#authorization-error').textContent = result.status === 'failed'
+            ? '取消期间账号保存失败，请检查账号列表后重试。'
+            : '授权已进入最终处理状态，请确认结果。';
+        }
+        if (!isAuthorizationActive(result)) await Promise.all([loadAccounts(), loadSystem()]);
+        if (state.authorizationEpoch !== epoch) return;
+        if (isAuthorizationActive(result)) scheduleAuthorizationPoll(epoch);
+        return;
+      }
     } catch (error) {
       if (state.authorizationEpoch !== epoch) return;
       if (error.status === 401 || isCsrfFailure(error)) {
@@ -872,6 +978,7 @@ async function changePassword(event) {
 
 $('#login-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (state.logoutPending) return;
   $('#login-error').textContent = '';
   const button = event.submitter;
   button.disabled = true;
@@ -894,9 +1001,15 @@ $('#login-form').addEventListener('submit', async (event) => {
 });
 
 $('#logout-button').addEventListener('click', async () => {
-  try { await api('/logout', { method: 'POST', body: '{}' }); } catch {}
+  if (state.logoutPending) return;
+  state.logoutPending = true;
+  const logoutRequest = api('/logout', { method: 'POST', body: '{}' }).catch(() => {});
   state.csrfToken = '';
   showLogin();
+  await logoutRequest;
+  state.logoutPending = false;
+  $('#login-error').textContent = '';
+  $('#login-form button[type="submit"]').disabled = false;
 });
 
 $$('.nav-button').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));

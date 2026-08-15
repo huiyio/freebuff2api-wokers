@@ -143,14 +143,16 @@ export function createAdminHandler({
       }
 
       if (path === '/admin/api/logout' && request.method === 'POST') {
+        auth.revokeSession(session);
         await authorizer?.cancelBySession?.(session);
         return withCookies(json({ ok: true }), auth.logout(session));
       }
 
       if (path === '/admin/api/password' && request.method === 'PUT') {
         const body = await requestJson(request);
-        const cookies = await auth.changePassword(body.currentPassword, body.nextPassword, session, {
-          beforeSessionRevocation: () => authorizer?.cancelAll?.(),
+        const currentSession = auth.requireSession(request);
+        const cookies = await auth.changePassword(body.currentPassword, body.nextPassword, currentSession, {
+          afterSessionRevocation: () => authorizer?.cancelAll?.(),
         });
         return withCookies(json({ ok: true, reauthenticationRequired: true }), cookies);
       }
@@ -171,7 +173,7 @@ export function createAdminHandler({
           throw new AccountServiceError('Freebuff web authorization is unavailable', 503, 'FREEBUFF_AUTH_UNAVAILABLE');
         }
         await requestJson(request);
-        return json(await authorizer.start(session), 201);
+        return json(await authorizer.start(auth.requireSession(request)), 201);
       }
 
       const authorizationMatch = /^\/admin\/api\/account-authorizations\/([^/]+)$/.exec(path);
@@ -180,7 +182,7 @@ export function createAdminHandler({
           throw new AccountServiceError('Freebuff web authorization is unavailable', 503, 'FREEBUFF_AUTH_UNAVAILABLE');
         }
         await requestJson(request);
-        return json(await authorizer.poll(decodeURIComponent(authorizationMatch[1]), session));
+        return json(await authorizer.poll(decodeURIComponent(authorizationMatch[1]), auth.requireSession(request)));
       }
 
       if (authorizationMatch && request.method === 'DELETE') {
@@ -188,7 +190,7 @@ export function createAdminHandler({
           throw new AccountServiceError('Freebuff web authorization is unavailable', 503, 'FREEBUFF_AUTH_UNAVAILABLE');
         }
         await requestJson(request);
-        return json(await authorizer.cancel(decodeURIComponent(authorizationMatch[1]), session));
+        return json(await authorizer.cancel(decodeURIComponent(authorizationMatch[1]), auth.requireSession(request)));
       }
 
       const accountMatch = /^\/admin\/api\/accounts\/([^/]+)$/.exec(path);

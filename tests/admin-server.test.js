@@ -353,6 +353,65 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
   }
 });
 
+test('revokes a logout session before waiting for authorization cleanup', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'freebuff-admin-logout-order-'));
+  const store = new AccountStore({
+    databasePath: join(directory, 'admin.sqlite'),
+    vault: createCredentialVault('73'.repeat(32)),
+  });
+  let releaseCleanup;
+  let cleanupStarted;
+  const cleanupGate = new Promise((resolve) => { releaseCleanup = resolve; });
+  const cleanupStartedGate = new Promise((resolve) => { cleanupStarted = resolve; });
+  const auth = await initializeAdminAuth({
+    store,
+    initialPassword: 'logout-order-admin-password',
+    sessionTtlSeconds: 3600,
+  });
+  const handler = createAdminHandler({
+    auth,
+    accountService: { store },
+    uiDirectory: join(dirname(fileURLToPath(import.meta.url)), '..', 'admin-ui'),
+    authorizer: {
+      async cancelBySession() {
+        cleanupStarted();
+        await cleanupGate;
+        return { cancelled: 1 };
+      },
+    },
+  });
+
+  try {
+    const login = await handler(new Request('http://local/admin/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'logout-order-admin-password' }),
+    }), { remoteAddress: '127.0.0.1' });
+    const loginPayload = await login.json();
+    const cookieHeader = login.headers.getSetCookie().map((value) => value.split(';', 1)[0]).join('; ');
+    const loggingOut = handler(new Request('http://local/admin/api/logout', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: cookieHeader,
+        'x-csrf-token': loginPayload.csrfToken,
+      },
+      body: '{}',
+    }));
+    await cleanupStartedGate;
+    const oldSession = await handler(new Request('http://local/admin/api/session', {
+      headers: { cookie: cookieHeader },
+    }));
+    assert.equal(oldSession.status, 401);
+    releaseCleanup();
+    assert.equal((await loggingOut).status, 200);
+  } finally {
+    releaseCleanup?.();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('protects API key settings with auth and CSRF without leaking the stored value', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'freebuff-admin-api-key-'));
   const store = new AccountStore({

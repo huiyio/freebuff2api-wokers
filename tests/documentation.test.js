@@ -14,6 +14,7 @@ test('project responsibility and security documents are present and linked', () 
     'CHANGE_CONTROL.md',
     'SECURITY.md',
     'NOTICE.md',
+    'NON_DOCKER.md',
     'LICENSE',
     '.github/pull_request_template.md',
   ];
@@ -53,6 +54,14 @@ test('Docker documentation and GHCR publishing contract stay aligned', () => {
   assert.match(dockerGuide, /Package settings/);
   assert.match(dockerGuide, /授权账号/);
   assert.match(readme, /管理端 Web 授权/);
+  assert.match(readme, /\(NON_DOCKER\.md\)/);
+
+  const nonDockerGuide = read('NON_DOCKER.md');
+  assert.match(nonDockerGuide, /set -euo pipefail/);
+  assert.match(nonDockerGuide, /FREEBUFF_TOKEN=/);
+  assert.match(nonDockerGuide, /ADMIN_COOKIE_SECURE=false/);
+  assert.match(nonDockerGuide, /current\.next/);
+  assert.match(nonDockerGuide, /rollback_on_error/);
 
   assert.match(compose, /ghcr\.io\/huiyio\/freebuff2api-wokers:1\.8\.9-admin\.2/);
   assert.match(workflow, /packages: write/);

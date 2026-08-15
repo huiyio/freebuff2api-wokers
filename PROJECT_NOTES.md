@@ -1,6 +1,6 @@
 # freebuff2api-workers 当前项目基线
 
-更新日期：2026-08-16（Asia/Tokyo）
+更新日期：2026-08-16（Asia/Shanghai）
 项目位置：仓库根目录
 当前分支：`codex/per-account-proxy`
 上游远端：`https://github.com/pingmike2/freebuff2api-wokers.git`
@@ -43,7 +43,7 @@
 - `import-credentials.js`：一次性读取旧 `freebuff_credentials.json`，导入后只保留加密 SQLite。
 - `docker-entrypoint.sh`：默认使用镜像内固定 `worker.js`；`WORKER_UPDATE_MODE=latest` 时要求 URL 和 SHA-256 校验。
 - `tests/`：代理、存储、鉴权、管理端、导入器和 Worker 并发/流取消回归测试。
-- `README.md`：项目入口、模型、调用和部署摘要；`DOCKER.md`：GHCR 镜像、Compose、`docker run`、导入、HTTPS 和发布主文档；`UPSTREAM_SYNC.md`：升级、备份、回滚流程；`LEGAL_NOTICE.md`、`RESPONSIBILITIES.md`、`CHANGE_CONTROL.md`、`SECURITY.md`、`NOTICE.md`：法律边界、责任交接、变更审批、安全报告和第三方归属。
+- `README.md`：项目入口、模型、调用和部署摘要；`DOCKER.md`：GHCR 镜像、Compose、`docker run`、导入、HTTPS 和发布主文档；`NON_DOCKER.md`：Node/systemd VPS 部署、原子升级和回滚；`UPSTREAM_SYNC.md`：升级、备份、回滚流程；`LEGAL_NOTICE.md`、`RESPONSIBILITIES.md`、`CHANGE_CONTROL.md`、`SECURITY.md`、`NOTICE.md`：法律边界、责任交接、变更审批、安全报告和第三方归属。
 
 ## 3. API 路由
 
@@ -69,7 +69,7 @@ Node 管理侧：
 ### 管理模式（默认 Docker Compose）
 
 - `ADMIN_ENABLED=true` 时，`FREEBUFF_TOKEN` 和 `FREEBUFF_PROXY_URL` 必须为空；账号只能来自首次旧凭据导入或 Web 管理端。
-- 管理端“授权账号”先建立 `starting` 任务，再使用一次性授权链接和服务器端轮询；只有 `pending` 响应短暂返回登录链接，Token 只从上游响应直接写入加密 SQLite，绝不返回浏览器、审计日志或终态 URL。授权请求绑定当前管理员会话；取消、登出、密码修改、会话到期和超时均有终态屏障，短期内存记录会在完成、取消或超时后清除。
+- 管理端“授权账号”先建立 `starting` 任务，再使用一次性授权链接和服务器端轮询；只有 `pending` 响应短暂返回登录链接，Token 只从上游响应直接写入加密 SQLite，绝不返回浏览器、审计日志或终态 URL。授权请求绑定当前管理员会话；取消、登出、密码修改、会话到期和超时均有终态屏障，写库跨过期限会回滚，撤销期间会阻止新授权，短期内存记录会在完成、取消或超时后清除。
 - Token 和完整代理 URL 使用 AES-256-GCM 加密存入 SQLite；API 响应只返回掩码值。
 - 管理员账号写入 `settings.admin_username`，首次由 `ADMIN_USERNAME` 初始化（默认 `admin`），后续环境变量不会覆盖数据库值；密码使用 scrypt 哈希。Cookie 为 HttpOnly/SameSite=Strict，可在 HTTPS 反代后启用 Secure。
 - `REQUIRE_ACCOUNT_PROXY=true` 时，启用账号必须有 `http://`、`https://`、`socks5://` 或 `socks5h://` 代理；代理失败严格报错，不回退直连。
@@ -123,7 +123,7 @@ Node 管理侧：
 截至 2026-08-16：
 
 - `npm.cmd run check`：通过。
-- `npm.cmd test`：59/59 通过，包含管理员账号初始化/旧库补齐/重启持久化、API Key 轮换、Web 授权会话隔离与脱敏、授权任务并发 start/poll、取消/超时终态屏障、登出/密码修改撤销、每账号代理、并发 session 创建串行化，以及 Docker/GHCR 文档契约回归。
+- `npm.cmd test`：66/66 通过，包含管理员账号初始化/旧库补齐/重启持久化、并发改密串行化、API Key 轮换、Web 授权会话隔离与脱敏、授权任务并发 start/poll、写库跨期限回滚、取消/超时终态屏障、撤销期间阻止新授权、登出/密码修改撤销、每账号代理、并发 session 创建串行化，以及 Docker/GHCR 文档契约回归。
 - `npm.cmd audit --omit=dev`：0 vulnerabilities。
 - `npm.cmd ci --ignore-scripts --omit=dev --dry-run`：通过。
 - `git diff --check`：通过；仅有 Windows 行尾转换提示。
@@ -145,7 +145,7 @@ Node 管理侧：
 
 ## 10. 当前未完成事项
 
-- 功能分支尚未合并到 `main`；本次授权竞态修复待提交后部署。
+- 功能分支尚未合并到 `main`；本次授权竞态修复和非 Docker 部署文档待提交后部署。
 - 未在本机实际构建 Docker 镜像（环境缺少 Docker CLI）。
 - GHCR Package 尚未改为 Public；匿名 `docker pull` 前仍需一次人工确认，或继续使用 `docker login ghcr.io`。
 - 未实现跨 Cloudflare isolate 的全局账号协调；当前 Worker 仍是 isolate-local 状态。

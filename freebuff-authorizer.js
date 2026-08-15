@@ -114,6 +114,7 @@ export class FreebuffAuthorizer {
     this.pollIntervalMs = safeDuration(pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, 'pollIntervalMs');
     this.requestTimeoutMs = safeDuration(requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS, 'requestTimeoutMs');
     this.records = new Map();
+    this.revocationPromise = null;
   }
 
   #owner(session) {
@@ -365,6 +366,13 @@ export class FreebuffAuthorizer {
   }
 
   async start(session) {
+    if (this.revocationPromise) {
+      throw new FreebuffAuthorizationError(
+        'authorization is temporarily unavailable while administrator sessions are being revoked',
+        503,
+        'FREEBUFF_AUTH_REVOCATION_IN_PROGRESS',
+      );
+    }
     const owner = this.#owner(session);
     this.#cleanup();
     const existing = [...this.records.values()].find((record) => record.owner === owner && inFlight(record.status));
@@ -421,6 +429,10 @@ export class FreebuffAuthorizer {
       return;
     }
     if (!this.#matches(record, generation, 'pending')) return;
+    if (this.#now() >= record.deadlineAt) {
+      this.#expire(record);
+      return;
+    }
 
     record.status = 'completing';
     record.generation += 1;
@@ -433,6 +445,7 @@ export class FreebuffAuthorizer {
         enabled: false,
       }, record.actor);
       if (!this.#matches(record, completionGeneration, 'completing')) return;
+      if (this.#now() >= record.deadlineAt) record.terminationStatus ||= 'expired';
       if (record.terminationStatus) {
         const terminalStatus = record.terminationStatus;
         try {
@@ -459,6 +472,7 @@ export class FreebuffAuthorizer {
       this.#appendAudit(record, 'account.authorization_completed', 'Authorized account ' + record.account.name, record.account.id);
     } catch (error) {
       if (!this.#matches(record, completionGeneration, 'completing')) return;
+      if (this.#now() >= record.deadlineAt) record.terminationStatus ||= 'expired';
       const terminalStatus = record.terminationStatus || (error?.code === 'ACCOUNT_DUPLICATE' ? 'duplicate' : 'failed');
       this.#finish(record, terminalStatus);
       this.#appendAudit(
@@ -560,9 +574,18 @@ export class FreebuffAuthorizer {
   }
 
   async cancelAll() {
-    this.#cleanup();
-    const records = [...this.records.values()].filter((record) => inFlight(record.status));
-    await Promise.all(records.map((record) => this.#terminate(record, 'cancelled', 'Cancelled Freebuff web authorization after administrator session revocation')));
-    return { cancelled: records.length };
+    if (this.revocationPromise) return this.revocationPromise;
+    const promise = (async () => {
+      this.#cleanup();
+      const records = [...this.records.values()].filter((record) => inFlight(record.status));
+      await Promise.all(records.map((record) => this.#terminate(record, 'cancelled', 'Cancelled Freebuff web authorization after administrator session revocation')));
+      return { cancelled: records.length };
+    })();
+    this.revocationPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.revocationPromise === promise) this.revocationPromise = null;
+    }
   }
 }

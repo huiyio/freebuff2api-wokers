@@ -201,6 +201,7 @@ export class AdminAuth {
     this.maxLoginAttempts = maxLoginAttempts;
     this.loginWindowSeconds = loginWindowSeconds;
     this.attempts = new Map();
+    this.passwordChangeTail = Promise.resolve();
   }
 
   #attemptState(clientKey) {
@@ -308,8 +309,25 @@ export class AdminAuth {
     }
   }
 
-  logout(session) {
+  revokeSession(session) {
     if (session?.sessionHash) this.store.deleteSession(session.sessionHash);
+  }
+
+  revokeAllSessions() {
+    this.store.deleteAllSessions();
+  }
+
+  #requireActiveSession(session) {
+    const stored = session?.sessionHash ? this.store.getSession(session.sessionHash) : null;
+    const now = Math.floor(Date.now() / 1000);
+    if (!stored || stored.expiresAt <= now) {
+      if (stored) this.store.deleteSession(session.sessionHash);
+      throw new AdminAuthError('administrator authentication required');
+    }
+  }
+
+  logout(session) {
+    this.revokeSession(session);
     this.store.appendAudit({
       actor: this.username,
       action: 'admin.logout',
@@ -321,20 +339,30 @@ export class AdminAuth {
     ];
   }
 
-  async changePassword(currentPassword, nextPassword, session, { beforeSessionRevocation = null } = {}) {
-    const valid = await verifyPassword(currentPassword, this.store.getSetting('admin_password_hash'));
-    if (!valid) throw new AdminAuthError('current password is incorrect', 403, 'ADMIN_PASSWORD_INCORRECT');
-    const nextHash = await hashPassword(nextPassword);
-    if (typeof beforeSessionRevocation === 'function') await beforeSessionRevocation();
-    this.store.transaction(() => {
-      this.store.setSetting('admin_password_hash', nextHash);
-      this.store.deleteAllSessions();
-      this.store.appendAudit({
-        actor: this.username,
-        action: 'admin.password_changed',
-        summary: 'Changed the administrator password and revoked all sessions',
+  async changePassword(currentPassword, nextPassword, session, { afterSessionRevocation = null } = {}) {
+    const previous = this.passwordChangeTail;
+    let release;
+    this.passwordChangeTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      this.#requireActiveSession(session);
+      const valid = await verifyPassword(currentPassword, this.store.getSetting('admin_password_hash'));
+      if (!valid) throw new AdminAuthError('current password is incorrect', 403, 'ADMIN_PASSWORD_INCORRECT');
+      const nextHash = await hashPassword(nextPassword);
+      this.#requireActiveSession(session);
+      this.store.transaction(() => {
+        this.store.setSetting('admin_password_hash', nextHash);
+        this.revokeAllSessions();
+        this.store.appendAudit({
+          actor: this.username,
+          action: 'admin.password_changed',
+          summary: 'Changed the administrator password and revoked all sessions',
+        });
       });
-    });
-    return this.logout(session);
+      if (typeof afterSessionRevocation === 'function') await afterSessionRevocation();
+      return this.logout(session);
+    } finally {
+      release();
+    }
   }
 }
