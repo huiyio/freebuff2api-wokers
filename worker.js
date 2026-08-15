@@ -1,6 +1,5 @@
 const CODEBUFF_API = "https://www.codebuff.com";
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
-const DEFAULT_API_KEY = "freebuff-default-key";
 const VERSION = "1.8.9";
 const CONTEXT_PRUNER_AGENT = "context-pruner";
 
@@ -374,6 +373,9 @@ const DESKTOP_INCLUDE_RATE_LIMITS = { "x-freebuff-include-unused-rate-limits": "
 
 
 export default {
+  invalidateAccountState(tokens, activeTokenValue, activeGeneration) {
+    invalidateAccountState(tokens, activeTokenValue, activeGeneration);
+  },
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders() });
@@ -383,16 +385,18 @@ export default {
       // 健康检查只读 Worker 最近一次真实请求形成的本地快照。
       // 不因为公开探针访问就向上游 fan-out GET /session 和 /me；这类请求
       // 会产生额外行为，也可能干扰同一账号正在进行的会话。
+      const accountHealth = summarizeAccountHealth(parseAccounts(env), acctHealth);
+      if (!await getApiKey(request, env)) delete accountHealth.account_details;
       return jsonResponse({
         status: "ok",
         version: VERSION,
-        ...summarizeAccountHealth(parseAccounts(env), acctHealth),
+        ...accountHealth,
         health_source: "worker_cache",
         time: new Date().toISOString(),
       }, 200);
     }
 
-    const key = getApiKey(request, env);
+    const key = await getApiKey(request, env);
     if (!key) {
       if (url.pathname === "/v1/messages" || url.pathname === "/messages" || url.pathname === "/v1/messages/count_tokens" || url.pathname === "/messages/count_tokens") {
         return anthropicError("Invalid API key", "authentication_error", 401);
@@ -428,12 +432,58 @@ export default {
 let accountIdx = 0;
 const cooldowns = new Map();      // token -> 冷却到期 ms
 const sessCache = new Map();      // `${token}:${sessionModel}` -> { instanceId, model, remainingMs, expiresAt }（必须带 token，多账号防串号）
+// 每个账号/代次/模型只允许一个 session 生命周期操作同时进入上游。
+// 这是一个按键串行的短队列，而不是简单复用 promise：后续调用会在前一个
+// 操作完成后再次检查缓存，因此并发请求最终复用同一个 active session，且失败
+// 不会把后续请求永久卡住。
+const sessionCreationTails = new Map();
+const ACCOUNT_SCOPE_SEPARATOR = "\u0000";
+const DEFAULT_ACCOUNT_GENERATION = "static";
+let activeAccountGeneration = DEFAULT_ACCOUNT_GENERATION;
+
+function normalizeAccountGeneration(value) {
+  const generation = String(value ?? DEFAULT_ACCOUNT_GENERATION).trim();
+  return generation || DEFAULT_ACCOUNT_GENERATION;
+}
+
+function scopedAccountKey(token, generation = activeAccountGeneration) {
+  return `${token}${ACCOUNT_SCOPE_SEPARATOR}${normalizeAccountGeneration(generation)}`;
+}
+
+function scopedCacheKey(token, generation, suffix) {
+  return `${scopedAccountKey(token, generation)}${ACCOUNT_SCOPE_SEPARATOR}${suffix}`;
+}
+
+function cacheScopeKey(key) {
+  const text = String(key || "");
+  const first = text.indexOf(ACCOUNT_SCOPE_SEPARATOR);
+  if (first < 0) return "";
+  const second = text.indexOf(ACCOUNT_SCOPE_SEPARATOR, first + 1);
+  return second < 0 ? text : text.slice(0, second);
+}
+
+function isCurrentAccountGeneration(generation) {
+  return normalizeAccountGeneration(generation) === activeAccountGeneration;
+}
+
+function advanceAccountGeneration(generation, { force = false } = {}) {
+  const next = normalizeAccountGeneration(generation);
+  if (force || activeAccountGeneration === DEFAULT_ACCOUNT_GENERATION) {
+    activeAccountGeneration = next;
+    return;
+  }
+  const currentNumber = Number(activeAccountGeneration);
+  const nextNumber = Number(next);
+  if (Number.isSafeInteger(currentNumber) && Number.isSafeInteger(nextNumber) && nextNumber >= currentNumber) {
+    activeAccountGeneration = next;
+  }
+}
 
 
-function parseAccounts(env) {
+function parseAccountValue(value) {
   // 支持一行一个（换行）或逗号分隔；每项可为纯 token 或 "token:uid"（冒号配对 user_id）
   // 例："t1\nt2:u2\nt3,u4:u4" → [{token:t1,uid:null},{token:t2,uid:u2},...]
-  return (env.FREEBUFF_TOKEN || "").split(/[\n,]/)
+  return String(value || "").split(/[\n,]/)
     .map((s) => s.trim())
     .filter((s) => s.length > 8)
     .map((s) => {
@@ -444,17 +494,89 @@ function parseAccounts(env) {
     .filter((a) => a.token.length > 8);
 }
 
+function parseAccounts(env) {
+  const generation = env.FREEBUFF_ACCOUNT_GENERATION === undefined
+    ? activeAccountGeneration
+    : normalizeAccountGeneration(env.FREEBUFF_ACCOUNT_GENERATION);
+  if (env.FREEBUFF_ACCOUNT_GENERATION !== undefined) advanceAccountGeneration(generation);
+  const pool = parseAccountValue(env.FREEBUFF_TOKEN).map((account) => ({ ...account, generation }));
+  if (isCurrentAccountGeneration(generation)) pruneInactiveAccountState(pool);
+  return pool;
+}
+
 // ---------------------------------------------------------------------------
 // 账号健康探测（v1.6.0）：GET /api/v1/me 不消耗 session/额度，探测 token 有效性并自动发现 uid
 // ---------------------------------------------------------------------------
 
 const acctHealth = new Map(); // token -> { alive, state, uid, quota, checkedAt }
 const HEALTH_OBSERVATION_TTL_MS = 10 * 60 * 1000;
+let activeAccountSignature = null;
+
+function deleteTokenCacheEntries(cache, token) {
+  const prefix = `${token}${ACCOUNT_SCOPE_SEPARATOR}`;
+  for (const key of cache.keys()) {
+    if (key.startsWith(prefix)) cache.delete(key);
+  }
+}
+
+function deleteTokenScopedEntries(cache, token) {
+  const prefix = `${token}${ACCOUNT_SCOPE_SEPARATOR}`;
+  for (const key of cache.keys()) {
+    if (String(key).startsWith(prefix)) cache.delete(key);
+  }
+}
+
+function clearTokenState(token) {
+  if (!token) return;
+  deleteTokenScopedEntries(cooldowns, token);
+  deleteTokenScopedEntries(acctHealth, token);
+  deleteTokenCacheEntries(sessCache, token);
+  deleteTokenCacheEntries(runCache, token);
+  deleteTokenCacheEntries(behaviorCache, token);
+}
+
+function pruneInactiveAccountState(pool) {
+  const activeKeys = new Set(pool.map((account) => scopedAccountKey(account.token, account.generation)));
+  const signature = [...activeKeys].sort().join("\0");
+  if (signature === activeAccountSignature) return;
+
+  for (const key of cooldowns.keys()) if (!activeKeys.has(key)) cooldowns.delete(key);
+  for (const key of acctHealth.keys()) if (!activeKeys.has(key)) acctHealth.delete(key);
+  for (const cache of [sessCache, runCache, behaviorCache]) {
+    for (const key of cache.keys()) {
+      if (!activeKeys.has(cacheScopeKey(key))) cache.delete(key);
+    }
+  }
+  accountIdx = pool.length > 0 ? accountIdx % pool.length : 0;
+  activeAccountSignature = signature;
+}
+
+function invalidateAccountState(tokens = [], activeTokenValue, activeGeneration) {
+  for (const token of Array.isArray(tokens) ? tokens : [tokens]) {
+    clearTokenState(String(token || "").trim());
+  }
+  if (activeTokenValue !== undefined) {
+    const generation = normalizeAccountGeneration(activeGeneration);
+    advanceAccountGeneration(generation, { force: true });
+    pruneInactiveAccountState(parseAccountValue(activeTokenValue).map((account) => ({ ...account, generation })));
+  }
+}
+
+function currentAccountObservation(health, token, generation, now = Date.now()) {
+  const info = health.get(scopedAccountKey(token, generation));
+  if (!info) return null;
+  if (!Number.isFinite(info.checkedAt) || now - info.checkedAt > HEALTH_OBSERVATION_TTL_MS) {
+    health.delete(scopedAccountKey(token, generation));
+    return null;
+  }
+  return info;
+}
 
 // 只记录真实业务请求已经观察到的上游结果。不要在 healthz 中主动探测，
 // 也不要把网络错误/未知响应误记成账号失效。
-function recordAccountObservation(token, status, dataOrText, extra = {}) {
+function recordAccountObservation(token, status, dataOrText, extra = {}, generation = activeAccountGeneration) {
   if (!token) return;
+  if (!isCurrentAccountGeneration(generation)) return;
   let data = dataOrText;
   if (typeof dataOrText === "string") {
     try { data = JSON.parse(dataOrText); } catch { data = null; }
@@ -472,8 +594,9 @@ function recordAccountObservation(token, status, dataOrText, extra = {}) {
   } else if (status === 429) state = "rate_limited";
   if (!state) return;
 
-  const previous = acctHealth.get(token) || {};
-  acctHealth.set(token, {
+  const key = scopedAccountKey(token, generation);
+  const previous = acctHealth.get(key) || {};
+  acctHealth.set(key, {
     ...previous,
     ...extra,
     alive: state === "ok",
@@ -486,13 +609,12 @@ function recordAccountObservation(token, status, dataOrText, extra = {}) {
 }
 
 function summarizeAccountHealth(pool, health) {
-  const account_details = pool.map((acct) => {
-    const info = health.get(acct.token);
+  const account_details = pool.map((acct, index) => {
+    const info = currentAccountObservation(health, acct.token, acct.generation);
     return {
-      token: acct.token.slice(0, 8) + "...",
+      account: index + 1,
       alive: info ? info.alive : null,
       state: info?.state || "unknown",
-      uid: info?.uid ? info.uid.slice(0, 8) + "..." : null,
     };
   });
   const account_states = {};
@@ -525,7 +647,7 @@ function pickToken(env, sessionModel) {
 
   // v1.6.0：跳过已探测为失效的号（alive=false）；未探测/探测失败的不跳过（避免误杀）
   const alivePool = pool.filter((acct) => {
-    const h = acctHealth.get(acct.token);
+    const h = currentAccountObservation(acctHealth, acct.token, acct.generation);
     return !(h && h.alive === false);
   });
   const usePool = alivePool.length > 0 ? alivePool : pool; // 全失效时回退全池，让请求继续（由 429 冷却接管）
@@ -542,8 +664,9 @@ function pickToken(env, sessionModel) {
   if (sessionModel) {
     for (const acct of finalPool) {
       const t = acct.token;
-      if (cooldowns.has(t) && cooldowns.get(t) > Date.now()) continue;
-      const cached = sessCache.get(t + ":" + sessionModel);
+      const cooldownKey = scopedAccountKey(t, acct.generation);
+      if (cooldowns.has(cooldownKey) && cooldowns.get(cooldownKey) > Date.now()) continue;
+      const cached = sessCache.get(scopedCacheKey(t, acct.generation, `session:${sessionModel}`));
       if (isUsableSession(cached)) {
         return acct;
       }
@@ -555,7 +678,8 @@ function pickToken(env, sessionModel) {
     const acct = finalPool[accountIdx % finalPool.length];
     accountIdx = (accountIdx + 1) % finalPool.length;
     const t = acct.token;
-    if (!cooldowns.has(t) || cooldowns.get(t) <= Date.now()) return acct;
+    const cooldownKey = scopedAccountKey(t, acct.generation);
+    if (!cooldowns.has(cooldownKey) || cooldowns.get(cooldownKey) <= Date.now()) return acct;
   }
   const oldest = [...cooldowns.entries()].sort((a, b) => a[1] - b[1])[0];
   if (oldest) cooldowns.delete(oldest[0]);
@@ -593,8 +717,10 @@ function logAccountRoute(enabled, pool, token, model, attempt, reason) {
   } catch {}
 }
 
-function cooldown(token, ms) {
-  if (ms > 0) cooldowns.set(token, Date.now() + ms);
+function cooldown(token, ms, generation = activeAccountGeneration) {
+  if (ms > 0 && isCurrentAccountGeneration(generation)) {
+    cooldowns.set(scopedAccountKey(token, generation), Date.now() + ms);
+  }
 }
 
 // Official Freebuff session-gate recovery requires matching both the HTTP
@@ -622,9 +748,9 @@ function isStaleSessionGate(status, body) {
 }
 
 // 仅供流式无首数据时确认 Premium 额度是否耗尽；不参与账号轮询排序。
-function remainingQuota(token, sessionModel) {
+function remainingQuota(token, sessionModel, generation = activeAccountGeneration) {
   if (modelPoolCategory(sessionModel) === "standard") return null;
-  const h = acctHealth.get(token);
+  const h = currentAccountObservation(acctHealth, token, generation);
   if (!h || !h.quota) return null;
   let entry = h.quota[sessionModel];
   if (!entry && modelPoolCategory(sessionModel) === "premium") {
@@ -694,15 +820,15 @@ class EmptyUpstreamStreamError extends Error {
   }
 }
 
-function invalidateSessionCache(token) {
-  const prefix = token + ":";
+function invalidateSessionCache(token, generation = activeAccountGeneration) {
+  const prefix = `${scopedAccountKey(token, generation)}${ACCOUNT_SCOPE_SEPARATOR}`;
   for (const key of sessCache.keys()) {
     if (key.startsWith(prefix)) sessCache.delete(key);
   }
 }
 
-async function deleteUpstreamSession(token, instanceId) {
-  invalidateSessionCache(token);
+async function deleteUpstreamSession(token, instanceId, generation = activeAccountGeneration) {
+  invalidateSessionCache(token, generation);
   if (!instanceId) return;
   try {
     await enqueueUp("DELETE", "/api/v1/freebuff/session", token, undefined,
@@ -760,22 +886,21 @@ function enqueueUp(method, path, token, body, extraHeaders, timeoutMs) {
 // 探测会顶掉正在推理的会话（428 waiting_room_required）。luna effort=high
 // 等长推理模型首 token 可能 >20s，此时探测必然误伤。
 // 缓存缺失/过期/额度未知 → 一律不判定耗尽，继续等待上游。
-async function freshQuotaProbe(token, sessionModel) {
-  const cached = acctHealth.get(token);
+async function freshQuotaProbe(token, sessionModel, generation = activeAccountGeneration) {
+  const cached = currentAccountObservation(acctHealth, token, generation);
   if (!cached) return;
-  if (Date.now() - cached.checkedAt > HEALTH_OBSERVATION_TTL_MS) return;
   if (isQuotaExhausted(cached, sessionModel)) throw new QuotaExhaustedError(cached);
 }
 
 // 流式 chat 不设置总时长 abort。只有在首个数据迟迟未到时，
 // 才强制刷新账号额度；额度未知或仍有额度时，原请求继续等待。
-async function fetchStreamWithQuotaGuard(url, init, token, sessionModel) {
+async function fetchStreamWithQuotaGuard(url, init, token, sessionModel, generation = activeAccountGeneration) {
   const controller = new AbortController();
   const request = fetch(url, { ...init, signal: controller.signal });
   let probeTimer = null;
   const armProbe = () => new Promise((_, reject) => {
     probeTimer = setTimeout(() => {
-      freshQuotaProbe(token, sessionModel).catch((error) => {
+      freshQuotaProbe(token, sessionModel, generation).catch((error) => {
         if (error instanceof QuotaExhaustedError) {
           try { controller.abort(error); } catch { controller.abort(); }
           reject(error);
@@ -847,7 +972,9 @@ async function fetchStreamWithQuotaGuard(url, init, token, sessionModel) {
 const BEHAVIOR_CACHE_TTL_MS = 30 * 60 * 1000; // 30 分钟
 const behaviorCache = new Map(); // key -> ts
 
-function behaviorDue(key) {
+function behaviorDue(token, generation, kind) {
+  if (!isCurrentAccountGeneration(generation)) return false;
+  const key = scopedCacheKey(token, generation, `behavior:${kind}`);
   const ts = behaviorCache.get(key) || 0;
   if (Date.now() - ts > BEHAVIOR_CACHE_TTL_MS) {
     behaviorCache.set(key, Date.now());
@@ -872,10 +999,10 @@ function stableFingerprint(token) {
 // 广告链：POST /ads 拉取 → 若有 impUrl 则 POST /ads/impression 上报曝光。
 // 官方实现：getCliAdRequestUserAgent 发 Freebuff-CLI/<version> UA；
 // body {provider:"gravity", surface, sessionId, device, userAgent}；曝光 {impUrl, mode}
-async function runNormalClientBehavior(token, clientFingerprint) {
+async function runNormalClientBehavior(token, clientFingerprint, generation) {
   const failures = [];
   // 1) 广告拉取 + 曝光（每 30 分钟一次，避免每个请求都打广告接口）
-  if (behaviorDue("ads:" + token)) {
+  if (behaviorDue(token, generation, "ads")) {
     try {
       const ad = await enqueueUp("POST", "/api/v1/ads", token, {
         provider: "gravity",
@@ -893,7 +1020,7 @@ async function runNormalClientBehavior(token, clientFingerprint) {
     } catch (e) { failures.push("ads:" + String(e && e.message || e).slice(0, 80)); }
   }
   // 2) usage 触碰（30 分钟一次）
-  if (behaviorDue("usage:" + token)) {
+  if (behaviorDue(token, generation, "usage")) {
     try {
       await enqueueUp("POST", "/api/v1/usage", token,
         { fingerprintId: clientFingerprint },
@@ -903,16 +1030,17 @@ async function runNormalClientBehavior(token, clientFingerprint) {
   return failures;
 }
 
-async function createSession(token, sessionModel, forceCreate = false) {
+async function createSessionOnce(token, sessionModel, forceCreate = false, generation = activeAccountGeneration) {
+  const sessionKey = scopedCacheKey(token, generation, `session:${sessionModel}`);
   // 0) 正常客户端行为：广告链 + usage 触碰（30 分钟节流，失败静默）
-  try { await runNormalClientBehavior(token, stableFingerprint(token)); } catch {}
+  try { await runNormalClientBehavior(token, stableFingerprint(token), generation); } catch {}
   // 1) 缓存命中且未过期（剩 >60s）直接复用，避免每次请求都打上游 session 接口
   if (!forceCreate) {
-    const cached = sessCache.get(token + ":" + sessionModel);
+    const cached = sessCache.get(sessionKey);
     if (isUsableSession(cached)) {
       return cached;
     }
-    if (cached) sessCache.delete(token + ":" + sessionModel);
+    if (cached) sessCache.delete(sessionKey);
   }
   // 1) 查上游当前 session，同模型直接复用（forceCreate 时跳过：僵尸 active session 会被 GET 反复复用，
   //    导致 chat 一直 428；强制 POST 拿全新实例）
@@ -924,15 +1052,15 @@ async function createSession(token, sessionModel, forceCreate = false) {
       quota: cur.data?.rateLimitsByModel || null,
       uid: cur.data?.uid || null,
       retryAfterMs: cur.data?.retryAfterMs,
-    });
+    }, generation);
     if (cur.status === 200 && cur.data?.status === "active" && cur.data?.instanceId) {
       const cm = cur.data.model;
       if (!cm || cm === sessionModel) {
         const s = normalizeSession(cur.data, sessionModel);
-        sessCache.set(token + ":" + sessionModel, s);
+        if (isCurrentAccountGeneration(generation)) sessCache.set(sessionKey, s);
         return s;
       }
-      await deleteUpstreamSession(token, cur.data.instanceId);
+      await deleteUpstreamSession(token, cur.data.instanceId, generation);
     }
   }
 
@@ -948,10 +1076,10 @@ async function createSession(token, sessionModel, forceCreate = false) {
     quota: r.data?.rateLimitsByModel || null,
     uid: r.data?.uid || null,
     retryAfterMs: r.data?.retryAfterMs,
-  });
+  }, generation);
   if (r.status === 200 && r.data?.status === "active" && r.data?.instanceId) {
     const s = normalizeSession(r.data, sessionModel);
-    sessCache.set(token + ":" + sessionModel, s);
+    if (isCurrentAccountGeneration(generation)) sessCache.set(sessionKey, s);
     return s;
   }
   if (r.status === 200 && r.data?.status === "queued" && r.data?.instanceId) {
@@ -963,10 +1091,10 @@ async function createSession(token, sessionModel, forceCreate = false) {
         quota: q.data?.rateLimitsByModel || null,
         uid: q.data?.uid || null,
         retryAfterMs: q.data?.retryAfterMs,
-      });
+      }, generation);
       if (q.status === 200 && q.data?.status === "active") {
         const s = normalizeSession({ ...q.data, instanceId: q.data.instanceId || inst }, sessionModel);
-        sessCache.set(token + ":" + sessionModel, s);
+        if (isCurrentAccountGeneration(generation)) sessCache.set(sessionKey, s);
         return s;
       }
     }
@@ -974,6 +1102,20 @@ async function createSession(token, sessionModel, forceCreate = false) {
   }
   if (r.status === 409) throw new Error("session_model_mismatch: " + String(r.data?.message || r.data?.error || "上游拒绝该模型"));
   throw new Error("create session failed: " + r.status + " " + (r.text || "").slice(0, 300));
+}
+
+async function createSession(token, sessionModel, forceCreate = false, generation = activeAccountGeneration) {
+  const key = scopedCacheKey(token, generation, `session:${sessionModel}`);
+  const previous = sessionCreationTails.get(key) || Promise.resolve();
+  const current = previous
+    .catch(() => {})
+    .then(() => createSessionOnce(token, sessionModel, forceCreate, generation));
+  sessionCreationTails.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (sessionCreationTails.get(key) === current) sessionCreationTails.delete(key);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,11 +1146,11 @@ async function finishRun(token, runId, totalSteps) {
 // deepseek 等直接模型：主 run + context-pruner 子 run
 // 精简版：只 START 两个 run（chat 只校验 run_id 存在，recordStep/finishRun 可跳过），
 // 实测链路总耗时 4s 内（原版 8s），满足 qwenpaw check_model_connection 5s 超时
-const runCache = new Map();   // `${token}:${agentId}` -> { runId, childRunId, ts }
+const runCache = new Map();   // scoped token/generation/agent -> { runId, childRunId, ts }
 const RUN_CACHE_TTL_MS = 10 * 60 * 1000; // 实测 run_id 可跨请求复用（上游只校验存在性），10min 缓存省两次上游调用
 
-async function startRunChain(token, agentId) {
-  const key = token + ":" + agentId;
+async function startRunChain(token, agentId, generation = activeAccountGeneration) {
+  const key = scopedCacheKey(token, generation, `run:${agentId}`);
   const hit = runCache.get(key);
   if (hit && Date.now() - hit.ts < RUN_CACHE_TTL_MS) {
     return { runId: hit.runId, agentId, startedAt: utcNow(), childRunId: hit.childRunId, cached: true };
@@ -1016,7 +1158,9 @@ async function startRunChain(token, agentId) {
   const startedAt = utcNow();
   const runId = await startRun(token, agentId);
   const childRunId = await startRun(token, CONTEXT_PRUNER_AGENT, [runId]);
-  runCache.set(key, { runId, childRunId, ts: Date.now() });
+  if (isCurrentAccountGeneration(generation)) {
+    runCache.set(key, { runId, childRunId, ts: Date.now() });
+  }
   return { runId, agentId, startedAt, childRunId, cached: false };
 }
 
@@ -1345,14 +1489,15 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
   for (let acctTry = 0; acctTry < pool.length; acctTry++) {
     const acct = pickToken(env, mc.session);
     const token = acct ? acct.token : null;
+    const generation = acct?.generation || activeAccountGeneration;
     if (!token) break;
     logAccountRoute(debug, pool, token, mc.session, acctTry + 1,
-      isUsableSession(sessCache.get(token + ":" + mc.session)) ? "active_session" : "quota_or_round_robin");
+      isUsableSession(sessCache.get(scopedCacheKey(token, generation, `session:${mc.session}`))) ? "active_session" : "quota_or_round_robin");
     let rootRunId = null;
     let reviewerRunId = null;
     try {
-      const sess = await createSession(token, mc.session);
-      const root = await startRunChain(token, mc.root_agent || mc.agent);
+      const sess = await createSession(token, mc.session, false, generation);
+      const root = await startRunChain(token, mc.root_agent || mc.agent, generation);
       rootRunId = root.runId;
       // Desktop 协议的关键：reviewer 是 root run 的子 run。
       reviewerRunId = await startRun(token, reviewerAgent, [rootRunId]);
@@ -1372,9 +1517,9 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
       });
       if (!resp.ok) {
         const text = await resp.text();
-        recordAccountObservation(token, resp.status, text);
+        recordAccountObservation(token, resp.status, text, {}, generation);
         lastErrMsg = "reviewer upstream error: " + text.slice(0, 300);
-        cooldown(token, parseCooldown(text, resp.status));
+        cooldown(token, parseCooldown(text, resp.status), generation);
         throw new Error(lastErrMsg);
       }
 
@@ -1406,7 +1551,7 @@ async function executeCodeReview(env, chatParams, mc, isStream, mode) {
       lastErrMsg = String(e.message || e);
       if (reviewerRunId) await finishRun(token, reviewerRunId, 1).catch(() => {});
       if (rootRunId) await finishRun(token, rootRunId, 1).catch(() => {});
-      if (/start_run failed|timeout|timed out|abort|reviewer upstream/i.test(lastErrMsg)) cooldown(token, 60 * 1000);
+      if (/start_run failed|timeout|timed out|abort|reviewer upstream/i.test(lastErrMsg)) cooldown(token, 60 * 1000, generation);
     }
   }
   return jsonResponse({ error: { message: lastErrMsg || "code reviewer failed", type: "api_error" } }, 502);
@@ -1425,16 +1570,17 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
   for (let acctTry = 0; acctTry < pool.length; acctTry++) {
     const acct = pickToken(env, mc.session);
     const token = acct ? acct.token : null;
+    const generation = acct?.generation || activeAccountGeneration;
     if (!token) break;
     logAccountRoute(debug, pool, token, mc.session, acctTry + 1,
-      isUsableSession(sessCache.get(token + ":" + mc.session)) ? "active_session" : "quota_or_round_robin");
+      isUsableSession(sessCache.get(scopedCacheKey(token, generation, `session:${mc.session}`))) ? "active_session" : "quota_or_round_robin");
     try {
       // 1) session
-      const sess = await createSession(token, mc.session);
+      const sess = await createSession(token, mc.session, false, generation);
       if (debug) console.log(`[acct ${acctTry + 1}] session=${sess.instanceId}`);
 
       // 2) run 链
-      const run = await startRunChain(token, mc.agent);
+      const run = await startRunChain(token, mc.agent, generation);
       if (debug) console.log(`[acct ${acctTry + 1}] run=${run.runId}`);
 
       // 3) chat（428 waiting_room_required / 409 session_superseded = session 失效，
@@ -1459,7 +1605,7 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
         };
         try {
           resp = isStream
-            ? await fetchStreamWithQuotaGuard(CODEBUFF_API + "/api/v1/chat/completions", chatInit, token, mc.session)
+            ? await fetchStreamWithQuotaGuard(CODEBUFF_API + "/api/v1/chat/completions", chatInit, token, mc.session, generation)
             : await fetch(CODEBUFF_API + "/api/v1/chat/completions", {
                 ...chatInit,
                 signal: AbortSignal.timeout(NONSTREAM_TIMEOUT_MS),
@@ -1468,19 +1614,19 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
           // 空流只视为当前账号的同模型 session 疑似脏状态：
           // 删除上游旧实例，重建同模型 session，再重试一次；绝不改成别的模型。
           if (error instanceof EmptyUpstreamStreamError && attempt === 0) {
-            await deleteUpstreamSession(token, sessForChat.instanceId);
+            await deleteUpstreamSession(token, sessForChat.instanceId, generation);
             if (debug) console.log(`[acct ${acctTry + 1}][chat] empty stream, same-model session recovery`);
-            sessForChat = await createSession(token, mc.session, true);
+            sessForChat = await createSession(token, mc.session, true, generation);
             continue;
           }
           throw error;
         }
         if (resp.ok) {
-          recordAccountObservation(token, resp.status, null);
+          recordAccountObservation(token, resp.status, null, {}, generation);
           break;
         }
         errText = await resp.text();
-        recordAccountObservation(token, resp.status, errText);
+        recordAccountObservation(token, resp.status, errText, {}, generation);
         // 428 waiting_room_required（无活跃 session）/ 409 session_superseded（被新 session 顶替）
         // 都说明缓存 instance 已失效 → 清缓存强制重建后重试一次；不是限流，不计冷却
         const staleSession =
@@ -1488,14 +1634,14 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
           // Older upstream wrappers returned model mismatch as HTTP 502.
           (resp.status === 502 && (errText.includes("session_model_mismatch") || errText.includes("not valid for limited access")));
         if (staleSession && attempt === 0) {
-          await deleteUpstreamSession(token, sessForChat.instanceId);
+          await deleteUpstreamSession(token, sessForChat.instanceId, generation);
           if (debug) console.log(`[acct ${acctTry + 1}][chat] session stale (${resp.status}), recreate…`);
-          sessForChat = await createSession(token, mc.session, true);
+            sessForChat = await createSession(token, mc.session, true, generation);
           continue;
         }
         // 重建后仍失败：该号 session 状态异常，冷却交给外层换号
-        if (staleSession) cooldown(token, 60 * 1000);
-        cooldown(token, parseCooldown(errText, resp.status));
+        if (staleSession) cooldown(token, 60 * 1000, generation);
+        cooldown(token, parseCooldown(errText, resp.status), generation);
         break;
       }
       if (!resp.ok) {
@@ -1520,17 +1666,17 @@ async function executeChat(env, chatParams, mc, isStream, mode) {
       const msg = String(e.message || e);
       // 额度探测确认耗尽：清除当前模型 session，按上游 retryAfterMs 冷却后切号。
       if (e instanceof QuotaExhaustedError) {
-        sessCache.delete(token + ":" + mc.session);
-        cooldown(token, e.retryAfterMs || 5 * 60 * 1000);
+        invalidateSessionCache(token, generation);
+        cooldown(token, e.retryAfterMs || 5 * 60 * 1000, generation);
       }
       if (e instanceof EmptyUpstreamStreamError) {
-        cooldown(token, 60 * 1000);
+        cooldown(token, 60 * 1000, generation);
       }
       // 其他上游交互失败/超时继续沿用原有冷却逻辑；流式 chat 不再因固定 20s abort 进入这里。
       // createSession 429（额度耗尽）按 retryAfterMs/文本冷却，不能固定 60s。
       if (/create session failed|stayed queued|start_run failed|session_model_mismatch|abort|timeout|timed out|terminated/i.test(msg)) {
         const m429 = msg.match(/429/);
-        cooldown(token, m429 ? parseCooldown(msg, 429) : 60 * 1000);
+        cooldown(token, m429 ? parseCooldown(msg, 429) : 60 * 1000, generation);
       }
       lastErrMsg = msg;
       if (debug) console.log(`[acct ${acctTry + 1}] exception: ${msg.slice(0, 120)}, switch account`);
@@ -1757,8 +1903,11 @@ function pipeUpstreamToClient(upstreamBody, writable, onComplete) {
           }
         }
       }
-    } catch {}
+    } catch (error) {
+      try { await reader.cancel(error); } catch {}
+    }
     finally {
+      try { reader.releaseLock(); } catch {}
       try { if (onComplete) await onComplete(); } catch {}
       try { await writer.close(); } catch {}
     }
@@ -1927,46 +2076,49 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc, onCompl
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
           if (payload === "" || payload === "[DONE]") continue;
+          let obj;
           try {
-            const obj = unwrapData(JSON.parse(payload));
-            const choice = obj?.choices?.[0];
-            if (!choice) continue;
-            const delta = choice.delta || {};
-                if (obj.model) model = obj.model;
-                if (obj.usage) usage = obj.usage;
+            obj = unwrapData(JSON.parse(payload));
+          } catch {
+            continue;
+          }
+          const choice = obj?.choices?.[0];
+          if (!choice) continue;
+          const delta = choice.delta || {};
+          if (obj.model) model = obj.model;
+          if (obj.usage) usage = obj.usage;
 
-            // 工具调用增量（chat 格式 delta.tool_calls[]）
-            if (Array.isArray(delta.tool_calls)) {
-              for (const tc of delta.tool_calls) {
-                if (!tc || typeof tc !== "object") continue;
-                const ti = tc.index ?? 0;
-                let item = toolItems.get(ti);
-                if (!item) {
-                  item = startTool(tc);
-                  toolItems.set(ti, item);
-                  await send({ type: "response.output_item.added", output_index: item.outputIndex, item: { id: item.id, type: "function_call", status: "in_progress", call_id: item.callId, name: item.name, arguments: "" } });
-                }
-                const fn = tc.function || {};
-                if (fn.name && !item.name) item.name = fn.name;
-                if (fn.arguments) {
-                  item.args += fn.arguments;
-                  await send({ type: "response.function_call_arguments.delta", item_id: item.id, output_index: item.outputIndex, delta: fn.arguments });
-                }
+          // 工具调用增量（chat 格式 delta.tool_calls[]）
+          if (Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+              if (!tc || typeof tc !== "object") continue;
+              const ti = tc.index ?? 0;
+              let item = toolItems.get(ti);
+              if (!item) {
+                item = startTool(tc);
+                toolItems.set(ti, item);
+                await send({ type: "response.output_item.added", output_index: item.outputIndex, item: { id: item.id, type: "function_call", status: "in_progress", call_id: item.callId, name: item.name, arguments: "" } });
+              }
+              const fn = tc.function || {};
+              if (fn.name && !item.name) item.name = fn.name;
+              if (fn.arguments) {
+                item.args += fn.arguments;
+                await send({ type: "response.function_call_arguments.delta", item_id: item.id, output_index: item.outputIndex, delta: fn.arguments });
               }
             }
+          }
 
-            // 文本增量
-            if (delta.content) {
-              if (!contentItem) contentItem = startContent();
-              if (!contentItem.started) {
-                contentItem.started = true;
-                await send({ type: "response.output_item.added", output_index: contentItem.outputIndex, item: { id: contentItem.id, type: "message", status: "in_progress", role: "assistant", content: [] } });
-                await send({ type: "response.content_part.added", item_id: contentItem.id, output_index: contentItem.outputIndex, content_index: contentItem.contentIndex, part: { type: "output_text", text: "", annotations: [] } });
-              }
-              contentItem.text += delta.content;
-              await send({ type: "response.output_text.delta", item_id: contentItem.id, output_index: contentItem.outputIndex, content_index: contentItem.contentIndex, delta: delta.content });
+          // 文本增量
+          if (delta.content) {
+            if (!contentItem) contentItem = startContent();
+            if (!contentItem.started) {
+              contentItem.started = true;
+              await send({ type: "response.output_item.added", output_index: contentItem.outputIndex, item: { id: contentItem.id, type: "message", status: "in_progress", role: "assistant", content: [] } });
+              await send({ type: "response.content_part.added", item_id: contentItem.id, output_index: contentItem.outputIndex, content_index: contentItem.contentIndex, part: { type: "output_text", text: "", annotations: [] } });
             }
-          } catch {}
+            contentItem.text += delta.content;
+            await send({ type: "response.output_text.delta", item_id: contentItem.id, output_index: contentItem.outputIndex, content_index: contentItem.contentIndex, delta: delta.content });
+          }
         }
       }
 
@@ -2004,8 +2156,11 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc, onCompl
       );
       resp.usage = chatUsageToResponsesUsage(usage);
       await send({ type: "response.completed", response: resp });
-    } catch {}
+    } catch (error) {
+      try { await reader.cancel(error); } catch {}
+    }
     finally {
+      try { reader.releaseLock(); } catch {}
       try { if (onComplete) await onComplete(); } catch {}
       try { await writer.close(); } catch {}
     }
@@ -2099,6 +2254,11 @@ function cleanCache() {
         if (now - v.ts > RUN_CACHE_TTL_MS) runCache.delete(k);
       }
     }
+    if (behaviorCache.size > 50) {
+      for (const [k, ts] of behaviorCache) {
+        if (now - ts > BEHAVIOR_CACHE_TTL_MS) behaviorCache.delete(k);
+      }
+    }
   } catch {}
 }
 
@@ -2120,12 +2280,30 @@ async function handleModels() {
   }, 200, { "X-Freebuff2api-Version": VERSION });
 }
 
-function getApiKey(request, env) {
-  const expected = (env.API_KEY || env.FREEBUFF_API_KEY || DEFAULT_API_KEY).trim();
+async function constantTimeTextEqual(left, right) {
+  const encoder = new TextEncoder();
+  const [leftHash, rightHash] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(String(left || ""))),
+    crypto.subtle.digest("SHA-256", encoder.encode(String(right || ""))),
+  ]);
+  const leftBytes = new Uint8Array(leftHash);
+  const rightBytes = new Uint8Array(rightHash);
+  let difference = 0;
+  for (let index = 0; index < leftBytes.length; index++) {
+    difference |= leftBytes[index] ^ rightBytes[index];
+  }
+  return difference === 0;
+}
+
+async function getApiKey(request, env) {
+  const expected = String(env.API_KEY || env.FREEBUFF_API_KEY || "").trim();
   if (!expected) return null;
   const auth = request.headers.get("Authorization") || "";
-  if (auth.startsWith("Bearer ")) return auth.slice(7) === expected ? expected : null;
-  return request.headers.get("x-api-key") === expected ? expected : null;
+  const candidate = auth.startsWith("Bearer ")
+    ? auth.slice(7)
+    : request.headers.get("x-api-key");
+  if (!candidate) return null;
+  return await constantTimeTextEqual(candidate, expected) ? expected : null;
 }
 
 function jsonResponse(obj, status, extraHeaders = {}) {

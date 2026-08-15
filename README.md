@@ -59,11 +59,12 @@ Worker 通过 Cloudflare Workers 访问 Freebuff，上游通常会将请求识�
 
 ## 🚀 快速开始
 
-1. 获取 freebuff token（见下方「获取 FREEBUFF_TOKEN」）
+1. 兼容模式先获取 freebuff token（见下方「获取 FREEBUFF_TOKEN」）；Docker Web 管理模式可跳过，稍后从管理端添加账号
 2. 部署服务（见下方「部署」，**推荐 Docker 容器部署**）
 3. 配置环境变量：
-   - `FREEBUFF_TOKEN`（必需）= 你的 token
-   - `FREEBUFF_API_KEY`（可选）= 自定义访问 key，缺省 `freebuff-default-key`
+   - 兼容模式（`ADMIN_ENABLED=false`）设置 `FREEBUFF_TOKEN`；Web 管理模式通过首次导入或管理端添加账号
+   - `FREEBUFF_API_KEY`（管理模式首次启动必需；兼容模式始终必需）= 自定义随机强访问 key。管理模式完成首次初始化后，可在 Web 管理端的 **API Key** 页面查看掩码、手动设置或生成新 key。
+   - Docker 管理登录使用 `ADMIN_USERNAME` + `ADMIN_PASSWORD`；`ADMIN_USERNAME` 默认是 `admin`，只在首次初始化时写入数据库
 4. 用任意 OpenAI 客户端连接：
    - **Base URL**: `http://localhost:8877/v1`（Docker 部署）或 `https://你的worker名.你的子域.workers.dev/v1`（CF 部署，不推荐）
    - **API Key**: `<FREEBUFF_API_KEY 的值>`
@@ -133,110 +134,331 @@ python3 extract_freebuff.py chat "你好"      # 发一条消息测试模型 API
 
 ### 🐳 Docker 容器化部署（✅ 推荐）
 
-> 适合本地/NAS/VPS 长期运行：不受 Cloudflare Workers 限制，**不会暴露 CF 边缘标记**（`cf-worker` / `cf-ray`），账号封禁风险显著低于 CF 部署。镜像已发布到 **Docker Hub**，**无需 clone 仓库、无需构建**，一条命令即可部署。
->
-> 镜像地址：`pingmike/freebuff2api:latest`（[Docker Hub 页面](https://hub.docker.com/r/pingmike/freebuff2api)）
+Docker 版本包含独立的 Web 管理端、加密 SQLite 账号库和每账号固定出口代理。公开 API 监听容器 `8787`，管理端监听容器 `8788`；Compose 默认把两个端口分别只映射到宿主机回环地址 `127.0.0.1:8877` 和 `127.0.0.1:8878`。
 
----
+代理支持 `http://`、`https://`、`socks5://` 和 `socks5h://`。账号池选中哪个 Token，对 Freebuff 的请求就使用该账号的 `proxyUrl`。严格模式下代理缺失或连接失败都会直接报错，**不会回退直连**。代理只改变网络出口，不能恢复或绕过上游已经标记为 `banned` 的账号。
 
-#### 方式一：一键 `docker run`（最快）
+> 上游公开镜像 `pingmike/freebuff2api:latest` 不包含本分支的 Web 管理和代理适配层。请从本分支构建自己的不可变版本标签，不要用 `latest` 覆盖可回滚镜像。
 
-```bash
-# 1. 准备凭据文件 freebuff_credentials.json（多账号聚合格式，见「获取 authToken」）
-#    用提取工具生成：python3 freebuff_tools/extract_freebuff.py login
-#    或手动创建：{"accounts": {"<账号id>": {"email": "...", "authToken": "...", "name": "..."}}}
+#### 可选：准备旧账号导入文件
 
-# 2. 一键启动（变量直接内联，或改用 .env 文件）
-docker run -d --name freebuff2api --restart unless-stopped \
-  -p 8877:8787 \
-  -e PORT=8787 \
-  -e HOST=0.0.0.0 \
-  -e FREEBUFF_API_KEY=your-api-key \
-  -e RELAY_KEY= \
-  -v "$(pwd)/freebuff_credentials.json:/app/credentials/freebuff_credentials.json:ro" \
-  pingmike/freebuff2api:latest
+没有旧账号时跳过本节，启动后直接从 Web 端添加。需要导入提取工具生成的 `freebuff_tools/freebuff_credentials.json` 时，它支持聚合格式：
+
+```json
+{
+  "accounts": {
+    "account-id-1": {
+      "email": "account1@example.com",
+      "authToken": "replace-with-this-accounts-auth-token"
+    },
+    "account-id-2": {
+      "email": "account2@example.com",
+      "authToken": "replace-with-this-accounts-auth-token"
+    }
+  }
+}
 ```
 
-变量多时也可以用 `.env` 文件（`docker run --env-file .env`）：
+也支持同一路径放一个单账号对象：
+
+```json
+{
+  "email": "account1@example.com",
+  "name": "account-1",
+  "authToken": "replace-with-this-accounts-auth-token",
+  "proxyUrl": "socks5://user:password@proxy.example.com:1080",
+  "proxyRequired": true,
+  "enabled": true
+}
+```
+
+导入规则如下：
+
+- 只在 SQLite 账号库为空且尚未完成旧凭据导入时执行一次；源 JSON 不会被修改或删除。
+- 导入成功后，SQLite 是 Web 管理账号的唯一数据源；继续编辑 JSON 不会热更新账号，删除全部账号也不会触发再次导入。后续启动会先检查导入标记，已完成时不再读取旧 JSON。
+- Compose 默认 `REQUIRE_ACCOUNT_PROXY=true`。聚合文件通常没有 `proxyUrl`，这类账号会被安全地导入为停用；登录管理端补充代理并启用即可。
+- Web 管理模式下 `.env` 中的 `FREEBUFF_TOKEN` 和 `FREEBUFF_PROXY_URL` 必须保持为空；账号只能通过首次导入或 Web 端进入 SQLite，避免出现管理端看不到的旁路账号。
+
+代理用户名或密码含 `@`、`:`、`/`、`#` 等保留字符时必须进行 URL 编码。凭据文件已被 `.gitignore` 和 `.dockerignore` 排除，仍需限制宿主机权限。一次性导入容器以 UID/GID `1000:1000` 运行；Linux 上要确保该用户能读取临时挂载文件：
 
 ```bash
-cat > .env <<'EOF'
-PORT=8787
-HOST=0.0.0.0
-FREEBUFF_API_KEY=your-api-key
+sudo chown 1000:1000 freebuff_tools/freebuff_credentials.json
+sudo chmod 600 freebuff_tools/freebuff_credentials.json
+```
+
+Rootless Docker 或自定义 UID 映射环境应使用对应的 `chown` 或 ACL。不要为了省事把凭据文件设为全局可读。
+
+默认 Compose 不挂载任何明文凭据。完成下方一次性导入后，日常容器只挂载加密 SQLite；先在 Web 端确认账号数量并备份主密钥，再移走或安全删除宿主机明文 JSON。
+
+#### 1. 生成密钥和 `.env`
+
+下面四项用途不同；API Key、数据库主密钥和管理员密码不得互相复用：
+
+- `FREEBUFF_API_KEY`：客户端调用公开 API 时使用。管理模式首次启动用它初始化加密 SQLite；之后可在 `http://127.0.0.1:8878/admin/` 的 **API Key** 页面轮换。页面只返回掩码，保存或生成后的明文仅在当前响应中显示一次；旧 key 会立即失效。
+- `ACCOUNT_STORE_KEY`：32 字节主密钥，用 AES-256-GCM 加密 SQLite 中的 Token 和完整代理 URL。**丢失或换错后现有数据库无法解密。**
+- `ADMIN_USERNAME`：首次启动初始化的管理员账号，默认 `admin`；区分大小写，3-128 个字符且不得包含任何空白。写入 SQLite 后，后续重启不会被环境变量覆盖。
+- `ADMIN_PASSWORD`：首次启动时初始化管理员密码，长度必须为 12-256 字符；之后可在 Web 管理端修改。
+
+Linux、macOS、Git Bash 或 WSL 可执行：
+
+```bash
+set -eu
+umask 077
+api_key="$(openssl rand -hex 32)"
+store_key="$(openssl rand -hex 32)"
+admin_password="$(openssl rand -hex 24)"
+admin_username="admin"
+
+cat > .env <<EOF
+FREEBUFF_API_KEY=${api_key}
+ACCOUNT_STORE_KEY=${store_key}
+ADMIN_USERNAME=${admin_username}
+ADMIN_PASSWORD=${admin_password}
+FREEBUFF_IMAGE=freebuff2api:1.8.9-admin.1
 RELAY_KEY=
+FREEBUFF_TOKEN=
+FREEBUFF_PROXY_URL=
+REQUIRE_ACCOUNT_PROXY=true
+ADMIN_COOKIE_SECURE=false
+ADMIN_TRUST_PROXY=false
+WORKER_UPDATE_MODE=bundled
 EOF
 
-docker run -d --name freebuff2api --restart unless-stopped \
-  -p 8877:8787 \
+chmod 600 .env
+unset api_key store_key admin_username admin_password
+```
+
+Windows PowerShell 可使用系统加密随机数生成器：
+
+```powershell
+function New-HexSecret([int]$Bytes) {
+  $buffer = [byte[]]::new($Bytes)
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $rng.GetBytes($buffer) } finally { $rng.Dispose() }
+  return -join ($buffer | ForEach-Object { $_.ToString('x2') })
+}
+
+@(
+  "FREEBUFF_API_KEY=$(New-HexSecret 32)"
+  "ACCOUNT_STORE_KEY=$(New-HexSecret 32)"
+  "ADMIN_USERNAME=admin"
+  "ADMIN_PASSWORD=$(New-HexSecret 24)"
+  "FREEBUFF_IMAGE=freebuff2api:1.8.9-admin.1"
+  "RELAY_KEY="
+  "FREEBUFF_TOKEN="
+  "FREEBUFF_PROXY_URL="
+  "REQUIRE_ACCOUNT_PROXY=true"
+  "ADMIN_COOKIE_SECURE=false"
+  "ADMIN_TRUST_PROXY=false"
+  "WORKER_UPDATE_MODE=bundled"
+) | Set-Content -Encoding ascii .env
+```
+
+`.env` 含 API 密钥、数据库主密钥、管理员账号和初始管理员密码，不能提交、截图或发送。把 `ACCOUNT_STORE_KEY` 另存到受保护的密码管理器；数据库备份必须与创建它时使用的同一把密钥配套保存。管理员账号只在首次初始化时读取，改动 `.env` 后需通过数据库迁移或重新初始化才会改变。
+
+#### 2. 可选：一次性导入旧账号
+
+只在需要迁移现有 `freebuff_credentials.json` 时执行。该命令临时只读挂载明文文件，写入加密 SQLite 后立即退出；它不会开放端口，也不会让后续日常容器继续看到源文件：
+
+Linux、macOS、Git Bash 或 WSL：
+
+```bash
+set -eu
+docker compose build
+docker compose run --rm --no-deps \
+  -v "$(pwd)/freebuff_tools/freebuff_credentials.json:/app/credentials/freebuff_credentials.json:ro" \
+  freebuff2api npm run import:credentials
+```
+
+Windows PowerShell：
+
+```powershell
+docker compose build
+docker compose run --rm --no-deps `
+  -v "${PWD}/freebuff_tools/freebuff_credentials.json:/app/credentials/freebuff_credentials.json:ro" `
+  freebuff2api npm run import:credentials
+```
+
+重复运行不会再次导入；账号库已有账号或已经完成导入时会安全跳过。导入文件不存在、格式错误或主密钥不匹配时命令以非零状态退出。
+
+#### 3. 启动 Compose
+
+```bash
+set -eu
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail 50 freebuff2api
+curl -fsS http://127.0.0.1:8877/healthz
+```
+
+启动后访问：
+
+- Web 管理端：`http://127.0.0.1:8878/admin/`
+- OpenAI-compatible Base URL：`http://127.0.0.1:8877/v1`
+- 管理登录：首次初始化使用 `.env` 中的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`；之后以 SQLite 保存的账号和密码哈希为准，在 Web 端修改密码后旧环境变量密码不会恢复生效
+- API Key：首次启动使用 `.env` 中的 `FREEBUFF_API_KEY`；后续以管理端 **API Key** 页面中保存的值为准
+
+正常日志只显示账号和代理计数，不显示 Token、完整代理 URL、代理密码或 API Key。在管理端可以新增、编辑、启停和删除账号，设置/轮换 API Key，并可对固定目标 `https://www.codebuff.com/` 做代理连通性测试；保存后账号路由和 API Key 会热加载，无需重启容器。
+
+若不用 Compose，等价的 `docker run` 示例为：
+
+```bash
+set -eu
+docker build -t freebuff2api:1.8.9-admin.1 .
+docker volume create freebuff_data
+
+# 可选旧账号导入（只运行一次；不需要时跳过）
+docker run --rm \
   --env-file .env \
-  -v "$(pwd)/freebuff_credentials.json:/app/credentials/freebuff_credentials.json:ro" \
-  pingmike/freebuff2api:latest
+  -e ACCOUNT_DB_PATH=/app/data/freebuff.sqlite \
+  -e CREDENTIALS_DIR=/app/credentials \
+  --mount type=bind,src="$(pwd)/freebuff_tools/freebuff_credentials.json",dst=/app/credentials/freebuff_credentials.json,readonly \
+  --mount type=volume,src=freebuff_data,dst=/app/data \
+  --entrypoint npm \
+  freebuff2api:1.8.9-admin.1 run import:credentials
+
+# 日常服务不挂载明文凭据
+docker run -d --name freebuff2api --restart unless-stopped \
+  -p 127.0.0.1:8877:8787 \
+  -p 127.0.0.1:8878:8788 \
+  --env-file .env \
+  -e ADMIN_ENABLED=true \
+  -e ADMIN_HOST=0.0.0.0 \
+  -e ADMIN_PORT=8788 \
+  --mount type=volume,src=freebuff_data,dst=/app/data \
+  freebuff2api:1.8.9-admin.1
 ```
 
----
+#### 4. 远程访问与 HTTPS
 
-#### 方式二：docker compose（推荐长期运行）
+不要把公开 API 或管理端的明文 HTTP 端口直接暴露到公网：API Key、提示词和回复都可能被窃听。临时远程管理可使用 SSH 隧道：
 
 ```bash
-# 1. 一条命令：创建目录 → 写 compose → 配置 .env → 启动
-mkdir -p freebuff2api && cd freebuff2api && \
-cat > docker-compose.yml <<'EOF'
-services:
-  freebuff2api:
-    image: pingmike/freebuff2api:latest
-    container_name: freebuff2api
-    restart: unless-stopped
-    ports:
-      - "8877:8787"
-    environment:
-      - PORT=8787
-      - HOST=0.0.0.0
-      - FREEBUFF_API_KEY=${FREEBUFF_API_KEY}
-      - RELAY_KEY=${RELAY_KEY}
-    volumes:
-      - ./freebuff_credentials.json:/app/credentials/freebuff_credentials.json:ro
-EOF
-echo 'FREEBUFF_API_KEY=your-api-key' > .env && \
-docker compose pull && docker compose up -d
+ssh -L 8878:127.0.0.1:8878 user@your-server
 ```
 
-> 💡 compose 里的 `${FREEBUFF_API_KEY}` / `${RELAY_KEY}` 会自动从同目录的 `.env` 文件读取。
+然后在本机访问 `http://127.0.0.1:8878/admin/`。长期使用应通过 HTTPS 反向代理，并保持 `/admin/` 路径不被剥离。例如 Nginx TLS 站点中的位置配置：
 
-**凭据文件：** 启动前/后放入账号凭据，放入后重启容器生效：
+```nginx
+location /admin/ {
+    proxy_pass http://127.0.0.1:8878;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $remote_addr;
+}
+
+location /v1/ {
+    proxy_pass http://127.0.0.1:8877;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+}
+```
+
+确认 HTTPS 可用且 Nginx 是唯一能访问管理端的反向代理后，把 `.env` 改为 `ADMIN_COOKIE_SECURE=true` 和 `ADMIN_TRUST_PROXY=true`，再重建容器配置：
 
 ```bash
-chmod 600 freebuff_credentials.json
-# freebuff_credentials.json 多账号聚合格式：{"accounts": {"<账号id>": {"email": "...", "authToken": "...", "name": "..."}}}
-docker compose restart          # 或 docker restart freebuff2api
+docker compose up -d --force-recreate
 ```
 
----
+管理会话 Cookie 使用 `HttpOnly`、`SameSite=Strict`，写操作还要求 CSRF Token。`ADMIN_COOKIE_SECURE=true` 会额外添加 `Secure`；启用后必须通过 HTTPS 访问，否则浏览器不会发送会话 Cookie。
 
-#### 更新方式（不用重新构建、不用重新 pull）
+#### 5. SQLite 备份与恢复
 
-镜像采用**容器引导器模式**（借鉴 [fscarmen/Argo-Nezha-Service-Container](https://github.com/fscarmen/Argo-Nezha-Service-Container)）：容器每次启动时会自动从 GitHub raw 地址拉取最新 `worker.js`（拉取失败则回退镜像内置副本）。因此服务端改完 `worker.js` 推送 GitHub 后，**主部署重启容器即自动更新**；客户端侧偶尔 pull 新镜像即可：
+SQLite 位于 Compose 命名卷的 `/app/data/freebuff.sqlite`。为得到一致的单文件备份，先让服务正常停止并关闭 WAL，再从已停止的容器复制：
 
 ```bash
-docker compose pull && docker compose up -d   # 拉新镜像并重建
-docker compose restart                        # 或仅重启（自动拉最新 worker.js）
+set -eu
+backup_dir="$(cd .. && pwd)/freebuff2api-backups"
+mkdir -p "${backup_dir}"
+chmod 700 "${backup_dir}"
+docker compose stop -t 30 freebuff2api
+test "$(docker inspect --format '{{.State.ExitCode}}' freebuff2api)" = "0"
+
+backup_file="freebuff-$(date +%Y%m%d-%H%M%S).sqlite"
+docker cp "freebuff2api:/app/data/freebuff.sqlite" "${backup_dir}/${backup_file}"
+chmod 600 "${backup_dir}/${backup_file}"
+
+docker compose start freebuff2api
 ```
 
-#### 环境变量
+恢复前先确认 `.env` 中是该备份对应的 `ACCOUNT_STORE_KEY`，然后停止服务。下面命令通过检查容器挂载来取得 Compose 的真实卷名，不依赖容易写错的项目名前缀：
+
+```bash
+set -eu
+backup_file="freebuff-YYYYMMDD-HHMMSS.sqlite"
+backup_dir="$(cd .. && pwd)/freebuff2api-backups"
+test -f "${backup_dir}/${backup_file}"
+
+docker compose stop -t 30 freebuff2api
+test "$(docker inspect --format '{{.State.Running}}' freebuff2api)" = "false"
+data_volume="$(docker inspect \
+  --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Name}}{{end}}{{end}}' \
+  freebuff2api)"
+test -n "${data_volume}"
+
+docker run --rm \
+  -v "${data_volume}:/data" \
+  -v "${backup_dir}:/backup:ro" \
+  alpine:3.22 sh -eu -c '
+    source_file="/backup/$1"
+    test -f "$source_file"
+    temporary_file="/data/freebuff.restore.$$"
+    cp "$source_file" "$temporary_file"
+    chown 1000:1000 "$temporary_file"
+    chmod 600 "$temporary_file"
+    rm -f /data/freebuff.sqlite /data/freebuff.sqlite-wal /data/freebuff.sqlite-shm
+    mv "$temporary_file" /data/freebuff.sqlite
+  ' sh "${backup_file}"
+
+docker compose up -d
+docker compose logs --tail 50 freebuff2api
+```
+
+数据库含加密账号、管理员密码哈希、会话和审计记录，备份仍应按敏感数据保护。恢复后出现 `ACCOUNT_STORE_KEY verification failed`，说明主密钥与备份不匹配；不要生成新密钥覆盖原值。
+
+#### 6. 主要环境变量
 
 | 变量 | 说明 |
 |---|---|
-| `PORT` / `HOST` | 监听端口/地址，默认 `8787` / `0.0.0.0` |
-| `FREEBUFF_API_KEY` | 本 API 访问 key（缺省 `freebuff-default-key`） |
+| `PORT` / `HOST` | 公开 API 监听端口/地址，默认 `8787` / `0.0.0.0` |
+| `FREEBUFF_API_KEY` | 公开 API 的访问密钥；兼容模式始终显式设置，管理模式仅在加密 SQLite 尚未初始化时设置，之后可由管理端轮换 |
+| `ACCOUNT_STORE_KEY` | 管理账号库主密钥；必须是 32 字节对应的 64 位十六进制或 base64url |
+| `ADMIN_USERNAME` | 首次启动管理员账号，区分大小写，3-128 个字符且不能包含空白；默认 `admin`，数据库已有账号名后不会覆盖 |
+| `ADMIN_PASSWORD` | 首次启动初始化密码，12-256 字符；数据库已有密码哈希后不会用它覆盖 |
+| `FREEBUFF_IMAGE` | Compose 使用的不可变镜像标签；升级和回滚时同步修改，避免下次重建漂移 |
+| `PUBLIC_BIND_HOST` / `PUBLIC_BIND_PORT` | Compose 公开 API 宿主机映射，默认 `127.0.0.1:8877` |
+| `ADMIN_HOST` / `ADMIN_PORT` | 管理服务监听地址/端口；Compose 为 `0.0.0.0:8788`，宿主机只映射回环地址 |
+| `ADMIN_COOKIE_SECURE` | HTTPS 反代时设为 `true`；本地 HTTP 调试保持 `false` |
+| `ADMIN_TRUST_PROXY` | 只有管理端仅受信任反向代理可访问时设为 `true`，用于按转发 IP 限制登录 |
+| `ADMIN_SESSION_TTL_SECONDS` | 管理会话有效期，默认 `43200`（12 小时） |
+| `ADMIN_MAX_REQUEST_BODY_BYTES` | 管理 API 请求体上限，默认 `262144`（256 KiB） |
+| `ACCOUNT_DB_PATH` | SQLite 路径；Compose 固定为 `/app/data/freebuff.sqlite` |
+| `REQUIRE_ACCOUNT_PROXY` | `true` 为严格模式：所有启用账号必须配置代理，代理失败不允许直连回退 |
+| `ACCOUNT_PROXY_TARGET_HOSTS` | 受保护的上游主机，默认 `www.codebuff.com,codebuff.com` |
+| `ACCOUNT_PROXY_CONNECT_TIMEOUT_MS` | 代理 TCP/TLS/CONNECT 建连上限，默认 `10000` 毫秒 |
+| `ACCOUNT_PROXY_RETIRE_MS` | 热加载后旧代理连接池的排空时间，默认 `300000` 毫秒 |
+| `FREEBUFF_TOKEN` / `FREEBUFF_PROXY_URL` | 仅供 `ADMIN_ENABLED=false` 兼容模式；Web 管理模式必须留空 |
 | `FREEBUFF_DEBUG` | `true` 开启请求级调试日志 |
-| `CODEBUFF_API` | 上游地址，默认空=直连 `https://www.codebuff.com`；走自建中继时设为中继域名 |
-| `RELAY_KEY` | 中继密钥（`CODEBUFF_API` 指向带鉴权的中继时必填） |
+| `MAX_REQUEST_BODY_BYTES` | 公开 API 请求体上限，默认 `10485760`（10 MiB），超限返回 `413` |
+| `WORKER_UPDATE_MODE` | `bundled`（默认、固定版本）或 `latest`（重启时拉取） |
+| `WORKER_URL` / `WORKER_SHA256` | `latest` 模式的下载地址和 SHA-256；该模式强制要求校验值 |
+| `CODEBUFF_API` / `RELAY_KEY` | 上游兼容预留；当前上游 `worker.js` 仍固定使用官方地址 |
 
-> ⚠️ 容器内 `freebuff_credentials.json` 以只读方式挂载；`server.js` 启动时读取并组装 `FREEBUFF_TOKEN`（多账号逗号分隔）。`server.js` 兼容两种格式：多账号聚合 `{"accounts": {...}}`（提取工具默认输出）和单账号顶层 `authToken`。
+`FREEBUFF_API_KEY_FILE`、`ACCOUNT_STORE_KEY_FILE` 和 `ADMIN_PASSWORD_FILE` 也可从只读文件读取对应秘密；同名直接环境变量非空时优先。使用 Compose 时，这些变量只负责把**容器内路径**传给程序，必须同时用 Docker secrets、只读 bind mount 或等价方式把文件放进容器；仅在宿主机设置一个文件路径而不挂载文件会导致启动失败。默认 `.env` 示例使用直接值，因此不需要额外挂载。
+
+#### 7. 更新策略
+
+生产保持 `WORKER_UPDATE_MODE=bundled`，容器运行构建时通过测试的固定 `worker.js`。`latest` 模式只替换 `worker.js`，必须同时设置 `WORKER_SHA256`，最好让 `WORKER_URL` 指向不可变 commit；它仍无法更新 Web 管理、数据库迁移或代理依赖，不适合无人值守升级。
+
+完整的上游同步、测试、数据库备份和镜像回滚流程见 [`UPSTREAM_SYNC.md`](UPSTREAM_SYNC.md)。代理补丁位于 Docker/Node 适配层，正常合并上游业务更新时通常不会产生核心文件冲突。
 
 #### 维护者：发布新镜像到 Docker Hub
 
-仓库已配置 `.github/workflows/docker-publish.yml`（手动触发，多架构 amd64/arm64）。在 GitHub Secrets 配置 `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN` 后，到 Actions 页面手动 **Run workflow** 即可发布新镜像。
+仓库已配置 `.github/workflows/docker-publish.yml`（手动触发，多架构 amd64/arm64）。在 GitHub Secrets 配置 `DOCKERHUB_USERNAME` 与 `DOCKERHUB_TOKEN` 后，到 Actions 页面选择代理分支、填写不可变 `image_tag` 再运行。工作流拒绝 `latest` 和已经存在的标签。
 
 ### Cloudflare Worker 部署（❌ 不推荐）
 
@@ -256,7 +478,7 @@ worker 是**单文件**（`worker.js`），如仍需在 CF 部署：
    | 类型 | 名称 | 值 |
    |---|---|---|
    | 机密 | `FREEBUFF_TOKEN` | 你的 freebuff token（多账号用英文逗号分隔） |
-   | 机密 | `FREEBUFF_API_KEY` | 自定义访问 key（可选，不设则用 `freebuff-default-key`） |
+   | 机密 | `FREEBUFF_API_KEY` | 必需的随机强访问 key；缺失时 API 拒绝请求 |
 
 5. 部署完成后访问验证：
 

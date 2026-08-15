@@ -2,6 +2,16 @@ name: "Build and push images"
 
 on:
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Immutable image tag, for example 1.8.9-admin.1"
+        required: true
+        default: "1.8.9-admin.1"
+        type: string
+
+concurrency:
+  group: docker-publish-${{ inputs.image_tag }}
+  cancel-in-progress: false
 
 jobs:
   Building:
@@ -9,14 +19,34 @@ jobs:
       name: "Build image"
       env:
         DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        DOCKERHUB_REPOSITORY: ${{ secrets.DOCKERHUB_USERNAME }}/freebuff2api:latest
+        DOCKERHUB_REPOSITORY: ${{ secrets.DOCKERHUB_USERNAME }}/freebuff2api
+        IMAGE_TAG: ${{ inputs.image_tag }}
 
       steps:
       - name: Checkout code
         uses: actions/checkout@v4.1.1
         with:
           fetch-depth: 0
+
+      - name: Validate immutable image tag
+        shell: bash
+        run: |
+          if [[ "$IMAGE_TAG" == "latest" || ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "image_tag must be an immutable Docker tag and cannot be latest" >&2
+            exit 1
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install and test
+        run: |
+          npm ci
+          npm run check
+          npm test
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3.0.0
@@ -28,11 +58,25 @@ jobs:
         uses: docker/login-action@v3.0.0
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Refuse an existing image tag
+        shell: bash
+        run: |
+          image="${DOCKERHUB_REPOSITORY}:${IMAGE_TAG}"
+          if output="$(docker buildx imagetools inspect "$image" 2>&1)"; then
+            echo "image tag already exists and will not be overwritten: $image" >&2
+            exit 1
+          fi
+          if ! grep -Eqi 'not found|manifest unknown|no such manifest' <<<"$output"; then
+            echo "could not verify that the image tag is unused" >&2
+            echo "$output" >&2
+            exit 1
+          fi
 
       - name: Push images to Docker hub
         uses: docker/build-push-action@v5.1.0
         with:
           push: true
           platforms: linux/amd64, linux/arm64
-          tags: ${{ env.DOCKERHUB_REPOSITORY }}
+          tags: ${{ env.DOCKERHUB_REPOSITORY }}:${{ env.IMAGE_TAG }}

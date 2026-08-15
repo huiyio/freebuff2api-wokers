@@ -2,19 +2,53 @@ version: "3.8"
 
 services:
   freebuff2api:
-    image: ${DOCKERHUB_USERNAME}/freebuff2api:latest
+    build: .
+    image: ${FREEBUFF_IMAGE:-freebuff2api:1.8.9-admin.1}
     container_name: freebuff2api
     restart: unless-stopped
     ports:
-      - "8877:8787"
+      # 公开 API 默认也只绑定回环；远程调用应经 HTTPS 反向代理。
+      - "${PUBLIC_BIND_HOST:-127.0.0.1}:${PUBLIC_BIND_PORT:-8877}:8787"
+      # 管理端默认只绑定宿主机回环地址；远程访问请通过 HTTPS 反向代理或 SSH 隧道。
+      - "127.0.0.1:${ADMIN_BIND_PORT:-8878}:8788"
     environment:
       - PORT=8787
       - HOST=0.0.0.0
       # 上游地址：默认空=直连官方 www.codebuff.com；如走自建中继可设为中继域名
       - CODEBUFF_API=
       - RELAY_KEY=${RELAY_KEY}
-      - FREEBUFF_API_KEY=${FREEBUFF_API_KEY}
+      # 直接值或 *_FILE 二选一；server.js 负责在容器启动时校验最终值。
+      - FREEBUFF_API_KEY=${FREEBUFF_API_KEY:-}
+      - FREEBUFF_API_KEY_FILE=${FREEBUFF_API_KEY_FILE:-}
       - FREEBUFF_DEBUG=false
+      - MAX_REQUEST_BODY_BYTES=${MAX_REQUEST_BODY_BYTES:-10485760}
+      # Web 管理模式禁止旁路环境变量账号，这两项必须留空。
+      - FREEBUFF_TOKEN=${FREEBUFF_TOKEN:-}
+      - FREEBUFF_PROXY_URL=${FREEBUFF_PROXY_URL:-}
+      # 严格模式：每个账号必须配置 proxyUrl，代理失败绝不回退直连。
+      - REQUIRE_ACCOUNT_PROXY=${REQUIRE_ACCOUNT_PROXY:-true}
+      - ACCOUNT_PROXY_TARGET_HOSTS=${ACCOUNT_PROXY_TARGET_HOSTS:-www.codebuff.com,codebuff.com}
+      - ACCOUNT_PROXY_CONNECT_TIMEOUT_MS=${ACCOUNT_PROXY_CONNECT_TIMEOUT_MS:-10000}
+      - ACCOUNT_PROXY_RETIRE_MS=${ACCOUNT_PROXY_RETIRE_MS:-300000}
+      # Web 管理端与加密账号库。
+      - ADMIN_ENABLED=true
+      - ADMIN_HOST=0.0.0.0
+      - ADMIN_PORT=8788
+      - ADMIN_TRUST_PROXY=${ADMIN_TRUST_PROXY:-false}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - ADMIN_PASSWORD_FILE=${ADMIN_PASSWORD_FILE:-}
+      - ACCOUNT_STORE_KEY=${ACCOUNT_STORE_KEY:-}
+      - ACCOUNT_STORE_KEY_FILE=${ACCOUNT_STORE_KEY_FILE:-}
+      - ACCOUNT_DB_PATH=/app/data/freebuff.sqlite
+      - ADMIN_COOKIE_SECURE=${ADMIN_COOKIE_SECURE:-false}
+      # bundled 为经过测试的固定版本；latest 仅在明确接受运行时漂移时使用。
+      - WORKER_UPDATE_MODE=${WORKER_UPDATE_MODE:-bundled}
+      - WORKER_URL=${WORKER_URL:-}
+      - WORKER_SHA256=${WORKER_SHA256:-}
     volumes:
-      # 统一凭证：直接复用本地工具的 freebuff_credentials.json（多账号聚合格式）
-      - ./freebuff_tools/freebuff_credentials.json:/app/credentials/freebuff_credentials.json:ro
+      # 日常容器只挂载加密数据库；旧明文凭据通过一次性导入命令临时挂载。
+      - freebuff_data:/app/data
+
+volumes:
+  freebuff_data:

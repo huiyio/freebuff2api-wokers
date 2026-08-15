@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Freebuff Control</title>
+  <link rel="stylesheet" href="/admin/styles.css">
+</head>
+<body>
+  <section id="login-view" class="login-view" aria-labelledby="login-title">
+    <form id="login-form" class="login-panel">
+      <div class="brand-mark" aria-hidden="true">F</div>
+      <div>
+        <h1 id="login-title">Freebuff Control</h1>
+        <p class="muted">管理控制台</p>
+      </div>
+      <label for="login-username">管理员账号</label>
+      <input id="login-username" name="username" type="text" autocomplete="username" required minlength="3" maxlength="128" spellcheck="false">
+      <label for="login-password">管理员密码</label>
+      <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+      <button class="primary full-width" type="submit">登录</button>
+      <p id="login-error" class="form-error" role="alert"></p>
+    </form>
+  </section>
+
+  <div id="app-shell" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-mark small" aria-hidden="true">F</div>
+        <div>
+          <strong>Freebuff Control</strong>
+          <span id="sidebar-version">管理控制台</span>
+        </div>
+      </div>
+      <nav class="nav-list" aria-label="管理视图">
+        <button class="nav-button active" type="button" data-view="accounts">账号</button>
+        <button class="nav-button" type="button" data-view="audit">审计</button>
+        <button class="nav-button" type="button" data-view="system">系统</button>
+        <button class="nav-button" type="button" data-view="api-key">API Key</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="connection-state"><span class="state-dot online"></span>已连接</span>
+        <button id="logout-button" class="text-button inverse" type="button">退出</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <section id="accounts-view" class="view-section">
+        <header class="page-header">
+          <div>
+            <h2>账号</h2>
+            <p id="accounts-updated" class="muted"></p>
+          </div>
+          <button id="add-account-button" class="primary" type="button">添加账号</button>
+        </header>
+
+        <div class="summary-strip" aria-label="账号摘要">
+          <div><span>全部</span><strong id="metric-total">0</strong></div>
+          <div><span>已启用</span><strong id="metric-enabled">0</strong></div>
+          <div><span>代理正常</span><strong id="metric-proxy-ok">0</strong></div>
+          <div><span>异常</span><strong id="metric-errors">0</strong></div>
+        </div>
+
+        <div class="toolbar">
+          <label class="search-field">
+            <span class="sr-only">搜索账号</span>
+            <input id="account-search" type="search" placeholder="搜索名称或邮箱" autocomplete="off">
+          </label>
+          <label>
+            <span class="sr-only">状态筛选</span>
+            <select id="account-filter">
+              <option value="all">全部状态</option>
+              <option value="enabled">已启用</option>
+              <option value="disabled">已停用</option>
+              <option value="error">异常</option>
+            </select>
+          </label>
+          <button id="refresh-accounts" class="secondary" type="button">刷新</button>
+        </div>
+
+        <div class="table-frame">
+          <table class="responsive-table">
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>账号</th>
+                <th>代理</th>
+                <th>上游</th>
+                <th>最近代理测试</th>
+                <th class="actions-column">操作</th>
+              </tr>
+            </thead>
+            <tbody id="accounts-table-body"></tbody>
+          </table>
+          <div id="accounts-empty" class="empty-state hidden">没有匹配的账号</div>
+        </div>
+      </section>
+
+      <section id="audit-view" class="view-section hidden">
+        <header class="page-header">
+          <div>
+            <h2>审计</h2>
+            <p class="muted">最近 100 条管理操作</p>
+          </div>
+          <button id="refresh-audit" class="secondary" type="button">刷新</button>
+        </header>
+        <div class="table-frame">
+          <table class="responsive-table">
+            <thead><tr><th>时间</th><th>操作</th><th>账号</th><th>结果</th></tr></thead>
+            <tbody id="audit-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="system-view" class="view-section hidden">
+        <header class="page-header">
+          <div>
+            <h2>系统</h2>
+            <p class="muted">运行状态与安全设置</p>
+          </div>
+        </header>
+        <dl class="system-list">
+          <div><dt>应用版本</dt><dd id="system-version">-</dd></div>
+          <div><dt>Worker 版本</dt><dd id="worker-version">-</dd></div>
+          <div><dt>代理严格模式</dt><dd id="system-strict">-</dd></div>
+          <div><dt>已加载账号</dt><dd id="system-accounts">-</dd></div>
+          <div><dt>代理路由</dt><dd id="system-routes">-</dd></div>
+        </dl>
+        <div class="system-actions">
+          <button id="change-password-button" class="secondary" type="button">修改管理员密码</button>
+        </div>
+      </section>
+
+      <section id="api-key-view" class="view-section hidden">
+        <header class="page-header">
+          <div>
+            <h2>API Key</h2>
+            <p class="muted">公开接口访问凭据</p>
+          </div>
+        </header>
+        <div class="api-key-grid">
+          <dl class="system-list api-key-status">
+            <div><dt>当前状态</dt><dd id="api-key-state">-</dd></div>
+            <div><dt>当前 Key</dt><dd id="api-key-masked">-</dd></div>
+            <div><dt>最近更新</dt><dd id="api-key-updated">-</dd></div>
+          </dl>
+          <form id="api-key-form" class="api-key-panel">
+            <label for="api-key-input">设置自定义 Key</label>
+            <input id="api-key-input" type="password" autocomplete="new-password" minlength="20" maxlength="256" placeholder="至少 20 个字符">
+            <p class="muted">保存后旧 Key 立即失效。</p>
+            <div class="key-actions">
+              <button class="secondary" id="generate-api-key" type="button">生成并替换</button>
+              <button class="primary" id="save-api-key" type="submit">保存 Key</button>
+            </div>
+            <p id="api-key-form-error" class="form-error" role="alert"></p>
+          </form>
+        </div>
+        <section id="api-key-reveal" class="api-key-reveal hidden" aria-live="polite">
+          <div>
+            <strong>新 Key 仅显示一次</strong>
+            <p class="muted">请立即复制到客户端配置；刷新页面后不会再次显示。</p>
+          </div>
+          <div class="key-output-row">
+            <input id="api-key-output" type="text" readonly aria-label="新 API Key">
+            <button id="copy-api-key" class="secondary" type="button">复制</button>
+          </div>
+        </section>
+
+        <section id="integration-docs" class="integration-docs" aria-labelledby="integration-docs-title">
+          <header class="integration-header">
+            <div>
+              <h3 id="integration-docs-title">接入文档</h3>
+              <p class="muted">OpenAI-compatible API 与 Anthropic Messages 兼容层</p>
+            </div>
+          </header>
+
+          <div class="integration-connection">
+            <label for="integration-base-url">OpenAI Base URL</label>
+            <div class="integration-base-row">
+              <input id="integration-base-url" type="url" inputmode="url" spellcheck="false" aria-describedby="integration-base-help">
+              <button id="copy-integration-base-url" class="secondary" type="button">复制</button>
+            </div>
+            <p id="integration-base-help" class="muted">Docker 默认使用公共 API 端口 8877；反向代理部署可直接改成实际 HTTPS 地址。</p>
+            <div class="integration-auth-row">
+              <span>OpenAI 鉴权</span>
+              <code>Authorization: Bearer YOUR_API_KEY</code>
+              <span>Anthropic 鉴权</span>
+              <code>x-api-key: YOUR_API_KEY</code>
+            </div>
+            <p class="muted">将 <code>YOUR_API_KEY</code> 替换为上方保存或生成时显示的明文 Key；掩码不能用于客户端。</p>
+          </div>
+
+          <div class="endpoint-reference" aria-label="API 端点">
+            <div class="endpoint-row">
+              <strong class="http-method get">GET</strong>
+              <code>/healthz</code>
+              <span>健康检查，无需 API Key</span>
+            </div>
+            <div class="endpoint-row">
+              <strong class="http-method get">GET</strong>
+              <code>/v1/models</code>
+              <span>可用模型目录</span>
+            </div>
+            <div class="endpoint-row">
+              <strong class="http-method post">POST</strong>
+              <code>/v1/chat/completions</code>
+              <span>Chat Completions，支持流式与非流式文本</span>
+            </div>
+            <div class="endpoint-row">
+              <strong class="http-method post">POST</strong>
+              <code>/v1/responses</code>
+              <span>Responses API 兼容子集</span>
+            </div>
+            <div class="endpoint-row">
+              <strong class="http-method post">POST</strong>
+              <code>/v1/messages</code>
+              <span>Anthropic Messages 实验性兼容层</span>
+            </div>
+            <div class="endpoint-row">
+              <strong class="http-method post">POST</strong>
+              <code>/v1/messages/count_tokens</code>
+              <span>近似 Token 计数</span>
+            </div>
+          </div>
+
+          <div class="doc-tabs" role="tablist" aria-label="接入示例">
+            <button id="integration-tab-openai" class="doc-tab active" type="button" role="tab" aria-selected="true" aria-controls="integration-panel-openai" tabindex="0" data-doc-tab="openai">OpenAI SDK</button>
+            <button id="integration-tab-curl" class="doc-tab" type="button" role="tab" aria-selected="false" aria-controls="integration-panel-curl" tabindex="-1" data-doc-tab="curl">cURL</button>
+            <button id="integration-tab-anthropic" class="doc-tab" type="button" role="tab" aria-selected="false" aria-controls="integration-panel-anthropic" tabindex="-1" data-doc-tab="anthropic">Anthropic SDK</button>
+          </div>
+
+          <section id="integration-panel-openai" class="doc-panel" role="tabpanel" aria-labelledby="integration-tab-openai" data-doc-panel="openai">
+            <div class="code-toolbar">
+              <span>Python</span>
+              <button class="code-copy-button" type="button" data-copy-target="integration-code-openai">复制代码</button>
+            </div>
+            <pre><code id="integration-code-openai"></code></pre>
+          </section>
+
+          <section id="integration-panel-curl" class="doc-panel hidden" role="tabpanel" aria-labelledby="integration-tab-curl" data-doc-panel="curl">
+            <div class="code-toolbar">
+              <span>Shell</span>
+              <button class="code-copy-button" type="button" data-copy-target="integration-code-curl">复制代码</button>
+            </div>
+            <pre><code id="integration-code-curl"></code></pre>
+          </section>
+
+          <section id="integration-panel-anthropic" class="doc-panel hidden" role="tabpanel" aria-labelledby="integration-tab-anthropic" data-doc-panel="anthropic">
+            <div class="anthropic-base-line">
+              <span>Anthropic Base URL</span>
+              <code id="integration-anthropic-base-url"></code>
+              <button class="secondary" type="button" data-copy-target="integration-anthropic-base-url">复制</button>
+            </div>
+            <div class="code-toolbar">
+              <span>Python</span>
+              <button class="code-copy-button" type="button" data-copy-target="integration-code-anthropic">复制代码</button>
+            </div>
+            <pre><code id="integration-code-anthropic"></code></pre>
+          </section>
+
+          <div class="compatibility-notes">
+            <strong>兼容范围</strong>
+            <ul>
+              <li>模型 ID 以 <code>GET /v1/models</code> 返回的完整值为准；目录中出现不代表账号一定有对应资格或额度。</li>
+              <li>Responses API 为兼容子集；涉及工具调用时优先使用流式 Chat Completions。</li>
+              <li>Anthropic Messages 仍属实验性适配，<code>count_tokens</code> 返回近似值。</li>
+            </ul>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="account-dialog" class="modal">
+    <form id="account-form" method="dialog">
+      <header class="modal-header">
+        <h3 id="account-dialog-title">添加账号</h3>
+        <button class="icon-close" type="button" data-close-dialog="account-dialog" aria-label="关闭">×</button>
+      </header>
+      <input id="account-id" type="hidden">
+      <div class="form-grid">
+        <label>名称<input id="account-name" type="text" maxlength="80" required></label>
+        <label>邮箱<input id="account-email" type="email" maxlength="254"></label>
+        <label class="span-two">Freebuff Token<input id="account-token" type="password" maxlength="8192" autocomplete="off"></label>
+        <label class="span-two">代理 URL<input id="account-proxy" type="password" maxlength="2048" autocomplete="off" placeholder="socks5://user:password@host:port"></label>
+      </div>
+      <div class="toggle-row">
+        <label><input id="account-enabled" type="checkbox" checked>启用账号</label>
+        <label><input id="account-proxy-required" type="checkbox" checked>代理必需</label>
+        <label id="remove-proxy-row" class="hidden"><input id="account-remove-proxy" type="checkbox">移除现有代理</label>
+      </div>
+      <p id="account-form-error" class="form-error" role="alert"></p>
+      <footer class="modal-footer">
+        <button class="secondary" type="button" data-close-dialog="account-dialog">取消</button>
+        <button id="save-account-button" class="primary" type="submit">保存</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="delete-dialog" class="modal compact">
+    <form id="delete-form" method="dialog">
+      <header class="modal-header">
+        <h3>删除账号</h3>
+        <button class="icon-close" type="button" data-close-dialog="delete-dialog" aria-label="关闭">×</button>
+      </header>
+      <p id="delete-account-name" class="confirm-text"></p>
+      <footer class="modal-footer">
+        <button class="secondary" type="button" data-close-dialog="delete-dialog">取消</button>
+        <button class="danger" type="submit">删除</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="password-dialog" class="modal compact">
+    <form id="password-form" method="dialog">
+      <header class="modal-header">
+        <h3>修改管理员密码</h3>
+        <button class="icon-close" type="button" data-close-dialog="password-dialog" aria-label="关闭">×</button>
+      </header>
+      <label>当前密码<input id="current-password" type="password" autocomplete="current-password" required></label>
+      <label>新密码<input id="next-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+      <label>确认新密码<input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+      <p id="password-form-error" class="form-error" role="alert"></p>
+      <footer class="modal-footer">
+        <button class="secondary" type="button" data-close-dialog="password-dialog">取消</button>
+        <button class="primary" type="submit">更新密码</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="api-key-confirm-dialog" class="modal compact">
+    <form method="dialog">
+      <header class="modal-header">
+        <h3>生成新的 API Key</h3>
+        <button class="icon-close" type="submit" value="cancel" aria-label="关闭">×</button>
+      </header>
+      <p class="confirm-text">生成后当前 API Key 会立即失效，已配置的客户端需要改用新 Key。</p>
+      <footer class="modal-footer">
+        <button class="secondary" type="submit" value="cancel">取消</button>
+        <button class="primary" type="submit" value="confirm">继续生成</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+  <script src="/admin/app.js" defer></script>
+</body>
+</html>

@@ -8,6 +8,19 @@ freebuff_tools/freebuff_credentials.json
 freebuff_tools/banned_emails.json
 # Docker 容器凭据目录，绝不提交
 credentials/
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
 __pycache__/
 test/
 

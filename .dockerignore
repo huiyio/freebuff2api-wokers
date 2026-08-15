@@ -2,9 +2,24 @@
 .env
 .env.*
 credentials/
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
 wrangler.toml
 freebuff_tools/freebuff_credentials.json
 freebuff_tools/freebuff_credentials.example.json
+/credentials.yaml
+/deploy.sh
 
 # 仓库元数据
 .git/
@@ -15,6 +30,7 @@ freebuff_tools/freebuff_credentials.example.json
 
 # 测试与日志
 test/
+tests/
 freebuff_tools/test_*.py
 logs/
 CHANGELOG.md
