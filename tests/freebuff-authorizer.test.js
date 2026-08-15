@@ -13,6 +13,14 @@ function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+async function waitUntil(predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for background authorization');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function fixture(responses, options = {}) {
   let now = 1_000;
   const requests = [];
@@ -28,7 +36,10 @@ function fixture(responses, options = {}) {
     },
     async create(input, actor) {
       created.push({ input, actor });
-      if (options.createGate) await options.createGate;
+      const createGate = Array.isArray(options.createGates)
+        ? options.createGates[created.length - 1]
+        : options.createGate;
+      if (createGate) await createGate;
       if (options.createError) throw options.createError;
       const id = 'account-' + created.length;
       const account = {
@@ -61,7 +72,7 @@ function fixture(responses, options = {}) {
     randomBytesFn: () => Buffer.from([1, 2, 3, 4, 5, 6]),
     randomId: options.randomId || (() => 'authorization-1'),
     pollTimeoutMs: options.pollTimeoutMs || 5 * 60 * 1000,
-    pollIntervalMs: 5_000,
+    pollIntervalMs: options.pollIntervalMs || 5_000,
     fetchImpl: async (url, init) => {
       requests.push({ url: String(url), init });
       return fetchImpl(url, init, defaultResponse);
@@ -130,6 +141,29 @@ test('stores a successful web authorization as a disabled encrypted account with
   assert.doesNotMatch(JSON.stringify(setup.audit), /one-time-code|fingerprint-hash-value/);
   assert.match(setup.requests[2].url, /fingerprintId=codebuff-cli-AQIDBAUG/);
   assert.match(setup.requests[2].url, /fingerprintHash=fingerprint-hash-value/);
+});
+
+test('keeps polling and saves the account after the management page stops requesting status', async () => {
+  const setup = fixture([
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=background-code',
+      fingerprintHash: 'background-fingerprint-hash',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+    jsonResponse(401, { message: 'pending' }),
+    jsonResponse(200, {
+      user: { email: 'background@example.com', authToken: 'background-token-12345' },
+    }),
+  ], { pollIntervalMs: 5 });
+
+  const started = await setup.authorizer.start(session);
+  assert.equal(started.authorization.status, 'starting');
+  await waitUntil(() => setup.activeAccounts.size === 1);
+
+  const completed = await setup.authorizer.poll(started.authorization.id, session);
+  assert.equal(completed.authorization.status, 'completed');
+  assert.equal(completed.authorization.account.email, 'background@example.com');
+  assert.equal(setup.requests.length, 3);
 });
 
 test('binds authorization records to one administrator session and supports cancellation', async () => {
@@ -436,4 +470,100 @@ test('blocks new authorizations while all revoked sessions are being drained', a
   assert.equal(polled.authorization.status, 'cancelled');
   assert.equal(revoked.cancelled, 1);
   assert.equal(setup.activeAccounts.size, 0);
+});
+
+test('blocks new authorizations while a logged-out session is being drained', async () => {
+  let releaseCreate;
+  const createGate = new Promise((resolve) => { releaseCreate = resolve; });
+  const setup = fixture([
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=one-time-code',
+      fingerprintHash: 'fingerprint-hash-value',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+    jsonResponse(200, { user: { email: 'logout@example.com', authToken: 'logout-token-12345' } }),
+  ], { createGate });
+  const started = await setup.authorizer.start(session);
+  await nextTick();
+  const polling = setup.authorizer.poll(started.authorization.id, session);
+  while (setup.created.length === 0) await nextTick();
+  const revoking = setup.authorizer.cancelBySession(session);
+  await assert.rejects(
+    setup.authorizer.start({ sessionHash: 'session-b', actor: 'admin', expiresAt: 2_000 }),
+    (error) => error instanceof FreebuffAuthorizationError
+      && error.code === 'FREEBUFF_AUTH_REVOCATION_IN_PROGRESS'
+      && error.status === 503,
+  );
+  releaseCreate();
+  const [polled, revoked] = await Promise.all([polling, revoking]);
+  assert.equal(polled.authorization.status, 'cancelled');
+  assert.equal(revoked.cancelled, 1);
+  assert.equal(setup.activeAccounts.size, 0);
+});
+
+test('keeps authorization blocked until overlapping session revocations finish', async () => {
+  let releaseFirstCreate;
+  let releaseSecondCreate;
+  const firstCreateGate = new Promise((resolve) => { releaseFirstCreate = resolve; });
+  const secondCreateGate = new Promise((resolve) => { releaseSecondCreate = resolve; });
+  const authorizationResponses = [
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=first-code',
+      fingerprintHash: 'first-fingerprint-hash',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=second-code',
+      fingerprintHash: 'second-fingerprint-hash',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+    jsonResponse(200, { user: { email: 'first@example.com', authToken: 'first-token-12345' } }),
+    jsonResponse(200, { user: { email: 'second@example.com', authToken: 'second-token-12345' } }),
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=third-code',
+      fingerprintHash: 'third-fingerprint-hash',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+  ];
+  let nextAuthorization = 0;
+  const setup = fixture(authorizationResponses, {
+    createGates: [firstCreateGate, secondCreateGate],
+    randomId: () => `authorization-${++nextAuthorization}`,
+  });
+  const firstSession = { sessionHash: 'session-first', actor: 'admin', expiresAt: 2_000 };
+  const secondSession = { sessionHash: 'session-second', actor: 'admin', expiresAt: 2_000 };
+  const thirdSession = { sessionHash: 'session-third', actor: 'admin', expiresAt: 2_000 };
+
+  const first = await setup.authorizer.start(firstSession);
+  await nextTick();
+  const second = await setup.authorizer.start(secondSession);
+  await nextTick();
+  const firstPoll = setup.authorizer.poll(first.authorization.id, firstSession);
+  while (setup.created.length < 1) await nextTick();
+  const secondPoll = setup.authorizer.poll(second.authorization.id, secondSession);
+  while (setup.created.length < 2) await nextTick();
+
+  const revokingFirst = setup.authorizer.cancelBySession(firstSession);
+  const revokingAll = setup.authorizer.cancelAll();
+  releaseFirstCreate();
+  const firstRevoked = await revokingFirst;
+  assert.equal(firstRevoked.cancelled, 1);
+  await assert.rejects(
+    setup.authorizer.start(thirdSession),
+    (error) => error instanceof FreebuffAuthorizationError
+      && error.code === 'FREEBUFF_AUTH_REVOCATION_IN_PROGRESS'
+      && error.status === 503,
+  );
+
+  releaseSecondCreate();
+  const [firstResult, secondResult, allRevoked] = await Promise.all([firstPoll, secondPoll, revokingAll]);
+  assert.equal(firstResult.authorization.status, 'cancelled');
+  assert.equal(secondResult.authorization.status, 'cancelled');
+  assert.equal(allRevoked.cancelled, 2);
+  assert.equal(setup.activeAccounts.size, 0);
+
+  const resumed = await setup.authorizer.start(thirdSession);
+  assert.equal(resumed.authorization.status, 'starting');
+  await nextTick();
+  await setup.authorizer.cancel(resumed.authorization.id, thirdSession);
 });

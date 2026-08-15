@@ -608,7 +608,7 @@ function switchView(view) {
 
 function openAccountDialog(account = null) {
   state.editingId = account?.id || null;
-  $('#account-dialog-title').textContent = account ? '编辑账号' : '添加账号';
+  $('#account-dialog-title').textContent = account ? '编辑账号' : '导入已有 Token';
   $('#account-id').value = account?.id || '';
   $('#account-name').value = account?.name || '';
   $('#account-email').value = account?.email || '';
@@ -638,7 +638,7 @@ function authorizationMessage(authorization) {
     return '授权已完成，正在安全保存账号';
   }
   if (authorization.status === 'completed') {
-    return '授权完成，账号已保存。请配置代理后再启用。';
+    return '授权完成，账号已自动保存并保持停用。';
   }
   return authorization.message || '授权未完成，请重新开始。';
 }
@@ -678,7 +678,8 @@ function renderAuthorizationDialog() {
   $('#authorization-progress-state').classList.toggle('hidden', !started);
   $('#authorization-error').textContent = '';
   if (!started) {
-    $('#authorization-start-button').disabled = state.authorizationClosing;
+    $('#authorization-start-button').disabled = state.authorizationClosing
+      || Boolean(state.authorizationController);
     $('#authorization-status').textContent = '';
     $('#authorization-link').removeAttribute('href');
     $('#authorization-link').classList.add('hidden');
@@ -695,16 +696,26 @@ function renderAuthorizationDialog() {
     link.classList.add('hidden');
   }
   $('#authorization-status').textContent = authorizationMessage(authorization);
-  $('#authorization-cancel-button').textContent = active ? '取消' : '关闭';
+  $('#authorization-cancel-button').textContent = active ? '取消授权' : '关闭';
   $('#authorization-cancel-button').disabled = state.authorizationClosing;
 }
 
 function openAuthorizationDialog() {
-  advanceAuthorizationFlow();
+  const shouldStart = !state.authorization && !state.authorizationController;
+  if (shouldStart) advanceAuthorizationFlow();
   renderAuthorizationDialog();
   const dialog = $('#account-authorization-dialog');
   if (!dialog.open) dialog.showModal();
   $('#authorization-start-button').focus();
+  if (shouldStart) void startAuthorization();
+}
+
+function hideAuthorizationDialog() {
+  if (state.authorizationClosing) return;
+  const continuesInBackground = isAuthorizationActive(state.authorization)
+    || Boolean(state.authorizationController);
+  closeDialog('account-authorization-dialog');
+  if (continuesInBackground) toast('授权任务将在服务端继续');
 }
 
 function scheduleAuthorizationPoll(epoch = state.authorizationEpoch) {
@@ -776,7 +787,7 @@ async function pollAuthorization(epoch = state.authorizationEpoch) {
     if (!isAuthorizationActive(state.authorization)) {
       clearAuthorizationPolling();
       if (state.authorization.status === 'completed') {
-        toast('账号授权完成，配置代理后即可启用');
+        toast('账号授权完成并已自动保存');
       } else if (state.authorization.status === 'duplicate') {
         toast('该 Freebuff 账号已经存在', 'error');
       } else if (state.authorization.status === 'failed') {
@@ -808,7 +819,7 @@ async function pollAuthorization(epoch = state.authorizationEpoch) {
   }
 }
 
-async function closeAuthorizationDialog() {
+async function cancelAuthorizationDialog() {
   if (state.authorizationClosing) return;
   const authorization = state.authorization;
   const epoch = advanceAuthorizationFlow({ clear: false });
@@ -886,7 +897,7 @@ async function saveAccount(event) {
       body: JSON.stringify(body),
     });
     $('#account-dialog').close();
-    toast(id ? '账号已更新' : '账号已添加');
+    toast(id ? '账号已更新' : '账号 Token 已导入');
     await Promise.all([loadAccounts(), loadSystem()]);
   } catch (error) {
     $('#account-form-error').textContent = error.message;
@@ -1017,11 +1028,11 @@ $$('[data-close-dialog]').forEach((button) => button.addEventListener('click', (
 $('#add-account-button').addEventListener('click', () => openAccountDialog());
 $('#authorize-account-button').addEventListener('click', openAuthorizationDialog);
 $('#authorization-start-button').addEventListener('click', startAuthorization);
-$('#authorization-cancel-button').addEventListener('click', () => { void closeAuthorizationDialog(); });
-$('#authorization-close-button').addEventListener('click', () => { void closeAuthorizationDialog(); });
+$('#authorization-cancel-button').addEventListener('click', () => { void cancelAuthorizationDialog(); });
+$('#authorization-close-button').addEventListener('click', hideAuthorizationDialog);
 $('#account-authorization-dialog').addEventListener('cancel', (event) => {
   event.preventDefault();
-  void closeAuthorizationDialog();
+  hideAuthorizationDialog();
 });
 $('#account-form').addEventListener('submit', saveAccount);
 $('#delete-form').addEventListener('submit', deleteAccount);

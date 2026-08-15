@@ -193,6 +193,7 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     assert.match(pageText, /api-key-confirm-dialog/);
     assert.match(pageText, /account-authorization-dialog/);
     assert.match(pageText, /authorize-account-button/);
+    assert.match(pageText, /导入 Token（高级）/);
     assert.match(pageText, /rel="noopener noreferrer"/);
     assert.match(pageText, /integration-docs/);
     assert.match(pageText, /integration-base-url/);
@@ -209,6 +210,9 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     assert.match(appText, /Authorization: Bearer YOUR_API_KEY/);
     assert.match(appText, /from anthropic import Anthropic/);
     assert.match(appText, /account-authorizations/);
+    assert.match(appText, /void startAuthorization\(\)/);
+    assert.match(appText, /authorization-close-button.*hideAuthorizationDialog/s);
+    assert.match(appText, /authorization-cancel-button.*cancelAuthorizationDialog/s);
 
     const stylesAsset = await handler(new Request('http://local/admin/styles.css'));
     assert.equal(stylesAsset.status, 200);
@@ -326,6 +330,7 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
       }),
     }));
     assert.equal(changedPassword.status, 200);
+    assert.equal(changedPassword.headers.getSetCookie().length, 0);
     assert.equal(authorizationCalls.at(-1).action, 'cancel-all');
 
     const relogin = await handler(new Request('http://local/admin/api/login', {
@@ -345,6 +350,7 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
       body: '{}',
     }));
     assert.equal(loggedOut.status, 200);
+    assert.equal(loggedOut.headers.getSetCookie().length, 0);
     assert.equal(authorizationCalls.at(-1).action, 'cancel-session');
   } finally {
     await runtime.close();

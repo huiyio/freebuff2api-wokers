@@ -406,6 +406,7 @@ async function shutdown(signal) {
   const forceExit = setTimeout(() => process.exit(1), 10000);
   forceExit.unref();
   await Promise.allSettled([closeServer(publicServer), closeServer(adminServer)]);
+  await Promise.allSettled([freebuffAuthorizer?.cancelAll?.()]);
   await runtime.close();
   accountStore?.close();
   clearTimeout(forceExit);

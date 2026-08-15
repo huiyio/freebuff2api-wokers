@@ -61,7 +61,7 @@ test('Docker documentation and GHCR publishing contract stay aligned', () => {
   assert.match(nonDockerGuide, /FREEBUFF_TOKEN=/);
   assert.match(nonDockerGuide, /ADMIN_COOKIE_SECURE=false/);
   assert.match(nonDockerGuide, /current\.next/);
-  assert.match(nonDockerGuide, /rollback_on_error/);
+  assert.match(nonDockerGuide, /rollback_on_exit/);
 
   assert.match(compose, /ghcr\.io\/huiyio\/freebuff2api-wokers:1\.8\.9-admin\.2/);
   assert.match(workflow, /packages: write/);

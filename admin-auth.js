@@ -175,6 +175,10 @@ export async function initializeAdminAuth({
     });
   }
 
+  // Browser cookies can outlive a restored database snapshot. Treat sessions as
+  // process-local state so a restart or restore cannot revive a revoked cookie.
+  store.deleteAllSessions();
+
   return new AdminAuth({
     store,
     username,
@@ -333,10 +337,9 @@ export class AdminAuth {
       action: 'admin.logout',
       summary: 'Administrator signed out',
     });
-    return [
-      cookie(SESSION_COOKIE, '', { maxAge: 0, secure: this.secureCookies, httpOnly: true }),
-      cookie(CSRF_COOKIE, '', { maxAge: 0, secure: this.secureCookies }),
-    ];
+    // The revoked cookie is harmless and the next login overwrites it. Returning
+    // a delayed deletion cookie could erase a newer session opened in another tab.
+    return [];
   }
 
   async changePassword(currentPassword, nextPassword, session, { afterSessionRevocation = null } = {}) {

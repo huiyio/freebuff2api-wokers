@@ -48,7 +48,7 @@ test('issues an HttpOnly session, enforces CSRF, and revokes logout', async () =
       () => fixture.auth.requireCsrf(new Request(request.url, { headers: { cookie: cookieHeader } }), session),
       (error) => error instanceof AdminAuthError && error.code === 'ADMIN_CSRF_INVALID',
     );
-    fixture.auth.logout(session);
+    assert.deepEqual(fixture.auth.logout(session), []);
     assert.equal(fixture.auth.authenticate(request), null);
   } finally {
     await fixture.close();
@@ -102,6 +102,35 @@ test('persists a custom administrator username and ignores later bootstrap chang
     await assert.rejects(restarted.login('changed-by-env', password, 'changed-user'), /invalid administrator credentials/);
     const accepted = await restarted.login('ops-admin', password, 'restarted-user');
     assert.equal(accepted.username, 'ops-admin');
+  } finally {
+    try { store?.close(); } catch {}
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('invalidates persisted administrator sessions when the auth service restarts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'freebuff-admin-session-restart-'));
+  const databasePath = join(directory, 'auth.sqlite');
+  const vaultKey = '55'.repeat(32);
+  const password = 'restart-session-password';
+  let store = null;
+
+  try {
+    store = new AccountStore({ databasePath, vault: createCredentialVault(vaultKey) });
+    const auth = await initializeAdminAuth({
+      store,
+      initialUsername: 'restart-admin',
+      initialPassword: password,
+    });
+    const login = await auth.login('restart-admin', password, 'restart-client');
+    const cookieHeader = login.cookies.map((value) => value.split(';', 1)[0]).join('; ');
+    const request = new Request('http://local/admin/api/session', { headers: { cookie: cookieHeader } });
+    assert.ok(auth.authenticate(request));
+
+    store.close();
+    store = new AccountStore({ databasePath, vault: createCredentialVault(vaultKey) });
+    const restarted = await initializeAdminAuth({ store });
+    assert.equal(restarted.authenticate(request), null);
   } finally {
     try { store?.close(); } catch {}
     await rm(directory, { recursive: true, force: true });

@@ -7,14 +7,16 @@
 - Node.js 24.x（以 `package.json` 的 `engines` 为准）和生产依赖由 `npm ci --omit=dev --ignore-scripts` 安装。
 - 建议用专用 `freebuff` 用户运行，SQLite 数据放在 `/var/lib/freebuff2api/`，环境文件放在 `/etc/freebuff2api/freebuff2api.env` 并设为 `0600`。
 - 公共 API 可以监听本机 `8787`；管理端建议只监听 `127.0.0.1:8788`。Caddy/Nginx 可提供 HTTPS，SSH 隧道则在加密隧道内访问本地 HTTP；不要把管理端以明文 HTTP 暴露到公网。
-- `ADMIN_ENABLED=true` 时，账号通过管理页“授权账号”完成一次性授权，Token 在服务端直接加密写入 SQLite；无需复制 Token。严格代理模式下，授权完成的账号仍需先填写代理并启用。
+- `ADMIN_ENABLED=true` 时，点击管理页“授权账号”会自动生成一次性链接；完成授权后由服务端后台轮询并把 Token 直接加密写入 SQLite，管理页面关闭也不会中断。账号默认停用，严格代理模式下先填写代理再启用。
 
 先按 Node.js 官方发行方式安装 Node 24，并记录实际绝对路径。systemd 不应假定自定义目录必然存在：
 
 ```bash
+id freebuff >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin freebuff
 NODE_BIN=$(command -v node)
 test -n "$NODE_BIN" && test -x "$NODE_BIN"
-"$NODE_BIN" -e 'if (Number(process.versions.node.split(".")[0]) < 24) process.exit(1)'
+case "$NODE_BIN" in /root/*|/home/*) echo 'Node must use a system-level path' >&2; exit 1;; esac
+runuser -u freebuff -- "$NODE_BIN" -e 'if (Number(process.versions.node.split(".")[0]) < 24) process.exit(1)'
 npm --version
 printf 'Node executable: %s\n' "$NODE_BIN"
 ```
@@ -45,7 +47,6 @@ scp freebuff2api-<COMMIT>.tar.gz <server>:/tmp/
 
 ```bash
 set -euo pipefail
-id freebuff >/dev/null 2>&1 || useradd --system --home /nonexistent --shell /usr/sbin/nologin freebuff
 sha256sum -c <<< '<SHA256>  /tmp/freebuff2api-<COMMIT>.tar.gz'
 test ! -e /opt/freebuff2api/releases/<COMMIT>
 install -d -o freebuff -g freebuff /opt/freebuff2api/releases/<COMMIT>
@@ -85,6 +86,8 @@ install -m 0600 freebuff2api.env /etc/freebuff2api/freebuff2api.env
 ```
 
 不要把真实环境文件、SQLite、旧凭据 JSON 或代理密码放进 release 归档、Shell 历史、日志或聊天记录。首次启动会把管理员账号/密码和 API Key 初始化到加密 SQLite；确认可以登录后可从环境文件删除 `ADMIN_PASSWORD` 和 bootstrap `FREEBUFF_API_KEY`，但 `ACCOUNT_STORE_KEY` 必须永久保留并纳入离线备份。之后修改 `ADMIN_USERNAME` 或 `ADMIN_PASSWORD` 环境变量不会覆盖数据库中的管理员账号。
+
+服务每次启动都会撤销数据库中的全部管理员会话。升级、重启或恢复 SQLite 后需要重新登录，以免备份中的旧会话让已注销或改密撤销的浏览器 Cookie 再次生效。
 
 上面的 Cookie/代理信任值适用于 SSH 隧道或仅本机访问。配置可信 HTTPS 反向代理后，再把 `ADMIN_COOKIE_SECURE=true`；只有反向代理会正确清理并设置客户端地址头时才启用 `ADMIN_TRUST_PROXY=true`。
 
@@ -142,15 +145,22 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 previous=$(readlink -f /opt/freebuff2api/current)
 test -d "$previous"
 test -d /opt/freebuff2api/releases/<COMMIT>
-rollback_on_error() {
+release_ok=false
+rollback_on_exit() {
   status=$?
-  trap - ERR
-  ln -s "$previous" /opt/freebuff2api/current.rollback-$stamp
-  mv -Tf /opt/freebuff2api/current.rollback-$stamp /opt/freebuff2api/current
-  systemctl restart freebuff2api.service || true
+  trap - EXIT INT TERM HUP
+  if [ "$release_ok" != true ]; then
+    set +e
+    rm -f /opt/freebuff2api/current.rollback-$stamp
+    ln -s "$previous" /opt/freebuff2api/current.rollback-$stamp
+    mv -Tf /opt/freebuff2api/current.rollback-$stamp /opt/freebuff2api/current
+    systemctl restart freebuff2api.service
+  fi
   exit "$status"
 }
-trap rollback_on_error ERR
+trap rollback_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 systemctl stop freebuff2api.service
 install -d -m 0700 /var/backups/freebuff2api
 cp -a /var/lib/freebuff2api/freebuff.sqlite /var/backups/freebuff2api/freebuff.sqlite.$stamp
@@ -161,7 +171,8 @@ systemctl restart freebuff2api.service
 systemctl is-active --quiet freebuff2api.service
 for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8787/healthz >/dev/null && break; sleep 1; done
 curl -fsS http://127.0.0.1:8787/healthz
-trap - ERR
+release_ok=true
+trap - EXIT INT TERM HUP
 ```
 
 保留旧 release。若新版本启动失败、管理登录失败、出现持续 5xx 或授权状态异常，将 symlink 切回上一个已验收目录并重启：

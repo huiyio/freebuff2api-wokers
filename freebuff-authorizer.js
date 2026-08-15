@@ -114,7 +114,7 @@ export class FreebuffAuthorizer {
     this.pollIntervalMs = safeDuration(pollIntervalMs, DEFAULT_POLL_INTERVAL_MS, 'pollIntervalMs');
     this.requestTimeoutMs = safeDuration(requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS, 'requestTimeoutMs');
     this.records = new Map();
-    this.revocationPromise = null;
+    this.revocationsInProgress = 0;
   }
 
   #owner(session) {
@@ -209,6 +209,7 @@ export class FreebuffAuthorizer {
     record.terminationStatus = null;
     const startController = record.startController;
     const pollController = record.pollController;
+    this.#clearPollTimer(record);
     record.startController = null;
     record.pollController = null;
     this.#clearSensitive(record);
@@ -290,6 +291,23 @@ export class FreebuffAuthorizer {
     return Math.min(now + this.pollTimeoutMs, sessionDeadline);
   }
 
+  #clearPollTimer(record) {
+    if (record.pollTimer) clearTimeout(record.pollTimer);
+    record.pollTimer = null;
+  }
+
+  #schedulePoll(record, delayMs = this.pollIntervalMs) {
+    if (record.status !== 'pending') return;
+    this.#clearPollTimer(record);
+    const delay = Math.max(1, Math.min(Number(delayMs) || this.pollIntervalMs, 2_147_483_647));
+    const timer = setTimeout(() => {
+      if (record.pollTimer === timer) record.pollTimer = null;
+      void this.#pollRecord(record, { scheduled: true }).catch(() => {});
+    }, delay);
+    timer.unref?.();
+    record.pollTimer = timer;
+  }
+
   #launchStart(record) {
     let promise;
     promise = this.#beginStart(record)
@@ -355,6 +373,7 @@ export class FreebuffAuthorizer {
       record.nextPollAt = this.#now();
       record.status = 'pending';
       record.generation += 1;
+      this.#schedulePoll(record);
     } catch {
       if (this.#matches(record, generation, 'starting')) {
         this.#finish(record, 'failed');
@@ -366,7 +385,7 @@ export class FreebuffAuthorizer {
   }
 
   async start(session) {
-    if (this.revocationPromise) {
+    if (this.revocationsInProgress > 0) {
       throw new FreebuffAuthorizationError(
         'authorization is temporarily unavailable while administrator sessions are being revoked',
         503,
@@ -405,6 +424,7 @@ export class FreebuffAuthorizer {
       startController: null,
       pollPromise: null,
       pollController: null,
+      pollTimer: null,
     };
     this.records.set(record.id, record);
     this.#appendAudit(record, 'account.authorization_started', 'Started Freebuff web authorization');
@@ -495,20 +515,21 @@ export class FreebuffAuthorizer {
     }
   }
 
-  async poll(id, session) {
-    this.#cleanup();
-    const record = this.#find(id, session);
+  async #pollRecord(record, { scheduled = false } = {}) {
     const now = this.#now();
-    if (record.status === 'starting' || record.status === 'completing' || record.status !== 'pending') {
+    if (record.status !== 'pending') return this.#details(record);
+    if (now >= record.deadlineAt) {
+      this.#expire(record);
       return this.#details(record);
     }
     if (record.pollPromise) return record.pollPromise;
-    if (now < record.nextPollAt) return this.#details(record);
+    if (!scheduled && now < record.nextPollAt) return this.#details(record);
 
+    this.#clearPollTimer(record);
     const generation = record.generation;
     const controller = new AbortController();
     const pollPromise = (async () => {
-      record.nextPollAt = now + this.pollIntervalMs;
+      record.nextPollAt = this.#now() + this.pollIntervalMs;
       record.pollController = controller;
       try {
         const { status, data } = await this.#request('GET', '/api/auth/cli/status', {
@@ -543,8 +564,17 @@ export class FreebuffAuthorizer {
     try {
       return await pollPromise;
     } finally {
-      if (record.pollPromise === pollPromise) record.pollPromise = null;
+      if (record.pollPromise === pollPromise) {
+        record.pollPromise = null;
+        if (record.status === 'pending') this.#schedulePoll(record);
+      }
     }
+  }
+
+  async poll(id, session) {
+    this.#cleanup();
+    const record = this.#find(id, session);
+    return this.#pollRecord(record);
   }
 
   async #terminate(record, status, summary) {
@@ -567,25 +597,26 @@ export class FreebuffAuthorizer {
 
   async cancelBySession(session) {
     const owner = this.#owner(session);
-    this.#cleanup();
-    const records = [...this.records.values()].filter((record) => record.owner === owner && inFlight(record.status));
-    await Promise.all(records.map((record) => this.#terminate(record, 'cancelled', 'Cancelled Freebuff web authorization after administrator session revocation')));
-    return { cancelled: records.length };
+    this.revocationsInProgress += 1;
+    try {
+      this.#cleanup();
+      const records = [...this.records.values()].filter((record) => record.owner === owner && inFlight(record.status));
+      await Promise.all(records.map((record) => this.#terminate(record, 'cancelled', 'Cancelled Freebuff web authorization after administrator session revocation')));
+      return { cancelled: records.length };
+    } finally {
+      this.revocationsInProgress -= 1;
+    }
   }
 
   async cancelAll() {
-    if (this.revocationPromise) return this.revocationPromise;
-    const promise = (async () => {
+    this.revocationsInProgress += 1;
+    try {
       this.#cleanup();
       const records = [...this.records.values()].filter((record) => inFlight(record.status));
       await Promise.all(records.map((record) => this.#terminate(record, 'cancelled', 'Cancelled Freebuff web authorization after administrator session revocation')));
       return { cancelled: records.length };
-    })();
-    this.revocationPromise = promise;
-    try {
-      return await promise;
     } finally {
-      if (this.revocationPromise === promise) this.revocationPromise = null;
+      this.revocationsInProgress -= 1;
     }
   }
 }
