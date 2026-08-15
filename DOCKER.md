@@ -14,29 +14,25 @@
 
 | 标签 | 是否可变 | 用途 |
 |---|---:|---|
-| `1.8.9-admin.1` 等版本标签 | 否 | 人工验收后的部署和回滚 |
+| `1.8.9-admin.2` 等版本标签 | 否 | 人工验收后的部署和回滚 |
 | `sha-<提交前12位>` | 否 | 每次维护分支推送对应的精确构建 |
 | `branch-codex-per-account-proxy` | 是 | 临时试用维护分支最新构建，不作为生产回滚点 |
 
 仓库不发布 `latest`。生产应固定版本标签、`sha-*` 标签，或进一步固定 Actions 输出的镜像 digest。
 
-截至 2026-08-15，`1.8.9-admin.1` 已由 GitHub Actions 成功发布；该 Package 当前为 private，部署机需要先用仅有 `read:packages` 权限的 GitHub PAT 登录：
+当前推荐版本为 `1.8.9-admin.2`。发布状态和最终 digest 必须以 GitHub Actions 构建摘要为准；该 Package 当前为 private，部署机需要先用仅有 `read:packages` 权限的 GitHub PAT 登录：
 
 ```bash
 printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
-docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1
+docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.2
 ```
 
-镜像 digest：
-
-```text
-sha256:6f36e3502497637ac8120cdf98ccbfca25169effb58798a6fcacd82449a1241c
-```
+镜像发布完成后，从 Actions 构建摘要复制 digest，并在生产环境进一步固定为 `ghcr.io/huiyio/freebuff2api-wokers@sha256:...`。
 
 仓库所有者可在 GitHub Package settings 的 Danger Zone 把包改为 Public；该操作不可恢复为 private，必须确认后人工执行。改成 Public 后可以匿名拉取：
 
 ```bash
-docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1
+docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.2
 ```
 
 不要把 PAT 写进 `.env`、Compose、Issue 或命令示例。
@@ -59,7 +55,7 @@ store_key="$(openssl rand -hex 32)"
 admin_password="$(openssl rand -hex 24)"
 
 cat > .env <<EOF
-FREEBUFF_IMAGE=ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1
+FREEBUFF_IMAGE=ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.2
 FREEBUFF_API_KEY=${api_key}
 ACCOUNT_STORE_KEY=${store_key}
 ADMIN_USERNAME=admin
@@ -88,7 +84,7 @@ function New-HexSecret([int]$Bytes) {
 }
 
 @(
-  "FREEBUFF_IMAGE=ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1"
+  "FREEBUFF_IMAGE=ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.2"
   "FREEBUFF_API_KEY=$(New-HexSecret 32)"
   "ACCOUNT_STORE_KEY=$(New-HexSecret 32)"
   "ADMIN_USERNAME=admin"
@@ -129,7 +125,7 @@ curl -fsS http://127.0.0.1:8877/healthz
 
 ## 3. 添加账号与代理
 
-最简单的方式是登录管理端，在“账号”页面点击“授权账号”，用你自己的 Codebuff/Freebuff 账号完成一次性授权。服务端会自动轮询并将 Token 加密写入 SQLite，无需复制 Token 到浏览器。严格代理模式下，授权完成的账号会先停用；补齐代理后再启用。
+最简单的方式是登录管理端，在“账号”页面点击“授权账号”，用你自己的 Codebuff/Freebuff 账号完成一次性授权。服务端先登记绑定当前会话的任务，再生成链接并自动轮询；Token 直接加密写入 SQLite，无需复制到浏览器。关闭页面后重新打开会复用同一个未完成任务，取消、登出或会话失效会终止任务。严格代理模式下，授权完成的账号会先停用；补齐代理后再启用。
 
 手动添加 Token 仍保留给旧凭据迁移或故障恢复。每个账号的代理格式：
 
@@ -143,7 +139,7 @@ socks5h://username:password@host:port
 
 用户名或密码含 `@`、`:`、`/`、`#` 等保留字符时必须进行 URL 编码。`REQUIRE_ACCOUNT_PROXY=true` 时，每个启用账号都必须配置代理；连接失败直接报错，不会回退直连。代理只能改变出口，不能恢复或绕过上游标记为 `banned` 的账号。
 
-Web 授权链接是短期能力凭据，只能由创建它的管理员会话轮询。不要转发链接、写入日志或在公网明文 HTTP 管理端使用；对外管理入口应由 HTTPS 反向代理保护。
+Web 授权链接是短期能力凭据，只能由创建它的管理员会话轮询；服务端只在“等待授权”状态的响应中返回链接，进入保存或终态后立即清除。不要转发链接、写入日志或在公网明文 HTTP 管理端使用；对外管理入口应由 HTTPS 反向代理保护。
 
 Web 管理模式下，`.env` 中的 `FREEBUFF_TOKEN` 和 `FREEBUFF_PROXY_URL` 必须保持为空；否则容器会拒绝启动，避免出现管理端看不到的旁路账号。
 
@@ -175,7 +171,7 @@ docker compose run --rm --no-deps `
 
 ```bash
 docker volume create freebuff_data
-docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1
+docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.2
 
 docker run -d --name freebuff2api --restart unless-stopped \
   -p 127.0.0.1:8877:8787 \
@@ -188,7 +184,7 @@ docker run -d --name freebuff2api --restart unless-stopped \
   -e ADMIN_PORT=8788 \
   -e ACCOUNT_DB_PATH=/app/data/freebuff.sqlite \
   --mount type=volume,src=freebuff_data,dst=/app/data \
-  ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1
+  ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.2
 ```
 
 旧账号导入也可用同一镜像运行一次性 `npm run import:credentials`；完整挂载参数参照上面的 Compose 示例。不要把明文凭据挂载到日常服务容器。

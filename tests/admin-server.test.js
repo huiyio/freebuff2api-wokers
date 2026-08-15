@@ -153,9 +153,17 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
         },
       };
     },
-    cancel(id, session) {
+    async cancel(id, session) {
       authorizationCalls.push({ action: 'cancel', id, session });
       return { authorization: { id, status: 'cancelled', createdAt: '2026-08-16T00:00:00.000Z' } };
+    },
+    async cancelBySession(session) {
+      authorizationCalls.push({ action: 'cancel-session', session });
+      return { cancelled: 1 };
+    },
+    async cancelAll() {
+      authorizationCalls.push({ action: 'cancel-all' });
+      return { cancelled: 1 };
     },
   };
   const auth = await initializeAdminAuth({
@@ -308,6 +316,36 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     assert.equal(limitedLogin.status, 429);
     assert.match(limitedLogin.headers.get('retry-after'), /^\d+$/);
     assert.equal((await limitedLogin.json()).error.type, 'ADMIN_LOGIN_RATE_LIMITED');
+
+    const changedPassword = await handler(new Request('http://local/admin/api/password', {
+      method: 'PUT',
+      headers: mutationHeaders,
+      body: JSON.stringify({
+        currentPassword: 'integration-admin-password',
+        nextPassword: 'integration-admin-password-next',
+      }),
+    }));
+    assert.equal(changedPassword.status, 200);
+    assert.equal(authorizationCalls.at(-1).action, 'cancel-all');
+
+    const relogin = await handler(new Request('http://local/admin/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'integration-admin-password-next' }),
+    }), { remoteAddress: '127.0.0.2' });
+    const reloginPayload = await relogin.json();
+    const reloginCookie = relogin.headers.getSetCookie().map((value) => value.split(';', 1)[0]).join('; ');
+    const loggedOut = await handler(new Request('http://local/admin/api/logout', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: reloginCookie,
+        'x-csrf-token': reloginPayload.csrfToken,
+      },
+      body: '{}',
+    }));
+    assert.equal(loggedOut.status, 200);
+    assert.equal(authorizationCalls.at(-1).action, 'cancel-session');
   } finally {
     await runtime.close();
     store.close();

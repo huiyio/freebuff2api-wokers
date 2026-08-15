@@ -61,6 +61,7 @@ Node 管理侧：
 - 公开 API 默认监听 `8787`，Compose 宿主机默认映射 `127.0.0.1:8877`。
 - 管理端默认监听 `8788`，Compose 宿主机默认映射 `127.0.0.1:8878`。
 - 管理端支持管理员账号/密码登录、账号增删改、启停、搜索、代理测试、审计查看、管理员密码修改，以及 API Key 设置/轮换和 OpenAI/Anthropic 接入文档。
+- `POST /admin/api/account-authorizations` 会立即返回 `starting` 任务；随后用同一 ID `POST` 轮询，状态为 `pending` 时才返回一次性登录链接；`DELETE` 取消任务。任务按管理员会话隔离，重复开始会复用活动任务。
 - `GET /admin/api/api-key` 只返回 `configured`、掩码和更新时间；`PUT /admin/api/api-key` 支持自定义值或 `{ "generate": true }`，明文只在当前响应中返回一次。
 
 ## 4. 账号、代理和状态模型
@@ -68,7 +69,7 @@ Node 管理侧：
 ### 管理模式（默认 Docker Compose）
 
 - `ADMIN_ENABLED=true` 时，`FREEBUFF_TOKEN` 和 `FREEBUFF_PROXY_URL` 必须为空；账号只能来自首次旧凭据导入或 Web 管理端。
-- 管理端“授权账号”使用一次性授权链接和服务器端轮询，Token 只从上游响应直接写入加密 SQLite，绝不返回浏览器、审计日志或 URL。授权请求绑定当前管理员会话，短期内存记录会在完成、取消或超时后清除。
+- 管理端“授权账号”先建立 `starting` 任务，再使用一次性授权链接和服务器端轮询；只有 `pending` 响应短暂返回登录链接，Token 只从上游响应直接写入加密 SQLite，绝不返回浏览器、审计日志或终态 URL。授权请求绑定当前管理员会话；取消、登出、密码修改、会话到期和超时均有终态屏障，短期内存记录会在完成、取消或超时后清除。
 - Token 和完整代理 URL 使用 AES-256-GCM 加密存入 SQLite；API 响应只返回掩码值。
 - 管理员账号写入 `settings.admin_username`，首次由 `ADMIN_USERNAME` 初始化（默认 `admin`），后续环境变量不会覆盖数据库值；密码使用 scrypt 哈希。Cookie 为 HttpOnly/SameSite=Strict，可在 HTTPS 反代后启用 Secure。
 - `REQUIRE_ACCOUNT_PROXY=true` 时，启用账号必须有 `http://`、`https://`、`socks5://` 或 `socks5h://` 代理；代理失败严格报错，不回退直连。
@@ -119,10 +120,10 @@ Node 管理侧：
 
 ## 8. 验证记录（本地、未使用真实上游凭据）
 
-截至 2026-08-15：
+截至 2026-08-16：
 
 - `npm.cmd run check`：通过。
-- `npm.cmd test`：55/55 通过，包含管理员账号初始化/旧库补齐/重启持久化、API Key 轮换、Web 授权会话隔离与脱敏、每账号代理、并发 session 创建串行化，以及 Docker/GHCR 文档契约回归。
+- `npm.cmd test`：59/59 通过，包含管理员账号初始化/旧库补齐/重启持久化、API Key 轮换、Web 授权会话隔离与脱敏、授权任务并发 start/poll、取消/超时终态屏障、登出/密码修改撤销、每账号代理、并发 session 创建串行化，以及 Docker/GHCR 文档契约回归。
 - `npm.cmd audit --omit=dev`：0 vulnerabilities。
 - `npm.cmd ci --ignore-scripts --omit=dev --dry-run`：通过。
 - `git diff --check`：通过；仅有 Windows 行尾转换提示。
@@ -144,7 +145,7 @@ Node 管理侧：
 
 ## 10. 当前未完成事项
 
-- 功能分支尚未合并到 `main`，本次改造也未生产部署。
+- 功能分支尚未合并到 `main`；本次授权竞态修复待提交后部署。
 - 未在本机实际构建 Docker 镜像（环境缺少 Docker CLI）。
 - GHCR Package 尚未改为 Public；匿名 `docker pull` 前仍需一次人工确认，或继续使用 `docker login ghcr.io`。
 - 未实现跨 Cloudflare isolate 的全局账号协调；当前 Worker 仍是 isolate-local 状态。

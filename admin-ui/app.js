@@ -13,6 +13,10 @@ const state = {
   pollTimer: null,
   authorization: null,
   authorizationPollTimer: null,
+  authorizationController: null,
+  authorizationEpoch: 0,
+  authorizationClosing: false,
+  sessionEpoch: 0,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -66,28 +70,89 @@ async function api(path, options = {}) {
   return payload;
 }
 
-function showLogin() {
-  clearInterval(state.pollTimer);
-  clearTimeout(state.authorizationPollTimer);
-  state.authorizationPollTimer = null;
-  state.authorization = null;
-  const authorizationDialog = $('#account-authorization-dialog');
-  if (authorizationDialog?.open) authorizationDialog.close();
+function closeDialog(id) {
+  const dialog = $('#' + id);
+  if (dialog?.open) dialog.close();
+}
+
+function clearAdminPresentation() {
+  state.accounts = [];
+  state.audit = [];
+  state.system = {};
   state.apiKey = {};
-  state.username = '';
+  state.editingId = null;
+  state.deletingId = null;
+  state.currentView = 'accounts';
+  $('#accounts-table-body').replaceChildren();
+  $('#audit-table-body').replaceChildren();
+  $('#accounts-empty').classList.add('hidden');
+  $('#accounts-updated').textContent = '';
+  $('#account-search').value = '';
+  $('#account-filter').value = 'all';
+  $('#sidebar-version').textContent = '管理控制台';
+  ['system-version', 'worker-version', 'system-strict', 'system-accounts', 'system-routes'].forEach((id) => {
+    $('#' + id).textContent = '-';
+  });
+  ['metric-total', 'metric-enabled', 'metric-proxy-ok', 'metric-errors'].forEach((id) => {
+    $('#' + id).textContent = '0';
+  });
   $('#api-key-output').value = '';
   $('#api-key-reveal').classList.add('hidden');
+  ['account-dialog', 'delete-dialog', 'password-dialog', 'api-key-confirm-dialog'].forEach(closeDialog);
+}
+
+function clearAuthorizationPolling() {
+  clearTimeout(state.authorizationPollTimer);
+  state.authorizationPollTimer = null;
+}
+
+function advanceAuthorizationFlow({ clear = true } = {}) {
+  state.authorizationEpoch += 1;
+  clearAuthorizationPolling();
+  state.authorizationController?.abort();
+  state.authorizationController = null;
+  state.authorizationClosing = false;
+  if (clear) state.authorization = null;
+  return state.authorizationEpoch;
+}
+
+function isAuthorizationActive(authorization) {
+  return ['starting', 'pending', 'completing'].includes(authorization?.status);
+}
+
+function isCurrentAuthorizationFlow(epoch, id = null) {
+  return state.authorizationEpoch === epoch
+    && !state.authorizationClosing
+    && (!id || state.authorization?.id === id);
+}
+
+function isCsrfFailure(error) {
+  return error.status === 403 && error.payload?.error?.type === 'ADMIN_CSRF_INVALID';
+}
+
+function showLogin() {
+  state.sessionEpoch += 1;
+  clearInterval(state.pollTimer);
+  advanceAuthorizationFlow();
+  closeDialog('account-authorization-dialog');
+  clearAdminPresentation();
+  state.csrfToken = '';
+  state.username = '';
   $('#app-shell').classList.add('hidden');
   $('#login-view').classList.remove('hidden');
   $('#login-username').focus();
 }
 
 async function showApp(session) {
+  const sessionEpoch = ++state.sessionEpoch;
+  advanceAuthorizationFlow();
+  clearAdminPresentation();
   state.csrfToken = session.csrfToken;
   state.username = session.username || '';
+  await Promise.all([loadAccounts(), loadSystem(), loadApiKey()]);
+  if (sessionEpoch !== state.sessionEpoch) return;
   $('#login-view').classList.add('hidden');
   $('#app-shell').classList.remove('hidden');
-  await Promise.all([loadAccounts(), loadSystem(), loadApiKey()]);
   clearInterval(state.pollTimer);
   state.pollTimer = setInterval(() => {
     if (state.currentView === 'accounts' && !document.hidden) void loadAccounts({ quiet: true });
@@ -179,8 +244,10 @@ function renderAccounts() {
 }
 
 async function loadAccounts({ quiet = false } = {}) {
+  const sessionEpoch = state.sessionEpoch;
   try {
     const payload = await api('/accounts');
+    if (sessionEpoch !== state.sessionEpoch) return;
     state.accounts = payload.accounts || [];
     renderAccounts();
     $('#accounts-updated').textContent = `更新于 ${new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date())}`;
@@ -191,8 +258,10 @@ async function loadAccounts({ quiet = false } = {}) {
 }
 
 async function loadAudit() {
+  const sessionEpoch = state.sessionEpoch;
   try {
     const payload = await api('/audit?limit=100');
+    if (sessionEpoch !== state.sessionEpoch) return;
     state.audit = payload.entries || [];
     $('#audit-table-body').innerHTML = state.audit.map((entry) => `
       <tr>
@@ -209,8 +278,10 @@ async function loadAudit() {
 }
 
 async function loadSystem() {
+  const sessionEpoch = state.sessionEpoch;
   try {
     const payload = await api('/system');
+    if (sessionEpoch !== state.sessionEpoch) return;
     state.system = payload.system || {};
     $('#system-version').textContent = state.system.appVersion || '-';
     $('#worker-version').textContent = state.system.workerVersion || '-';
@@ -233,8 +304,10 @@ function renderApiKeyInfo(info = {}) {
 }
 
 async function loadApiKey() {
+  const sessionEpoch = state.sessionEpoch;
   try {
     const payload = await api('/api-key');
+    if (sessionEpoch !== state.sessionEpoch) return;
     renderApiKeyInfo(payload.apiKey || {});
   } catch (error) {
     if (error.status === 401) return showLogin();
@@ -484,17 +557,18 @@ function openAccountDialog(account = null) {
   $('#account-name').focus();
 }
 
-function clearAuthorizationPolling() {
-  clearTimeout(state.authorizationPollTimer);
-  state.authorizationPollTimer = null;
-}
-
 function authorizationMessage(authorization) {
   if (!authorization) return '';
+  if (authorization.status === 'starting') {
+    return '正在生成一次性授权链接';
+  }
   if (authorization.status === 'pending') {
     return authorization.retrying
       ? '授权服务暂时不可用，正在自动重试'
       : '等待你在授权页完成登录';
+  }
+  if (authorization.status === 'completing') {
+    return '授权已完成，正在安全保存账号';
   }
   if (authorization.status === 'completed') {
     return '授权完成，账号已保存。请配置代理后再启用。';
@@ -502,19 +576,41 @@ function authorizationMessage(authorization) {
   return authorization.message || '授权未完成，请重新开始。';
 }
 
+function normalizeAuthorization(value) {
+  if (!value || typeof value !== 'object' || typeof value.id !== 'string' || !value.id || typeof value.status !== 'string') {
+    throw new Error('授权状态无效');
+  }
+  const authorization = {
+    id: value.id,
+    status: value.status,
+    createdAt: typeof value.createdAt === 'string' ? value.createdAt : null,
+  };
+  if (typeof value.message === 'string') authorization.message = value.message;
+  if (value.status === 'pending') {
+    if (value.retrying === true) authorization.retrying = true;
+    if (typeof value.loginUrl === 'string' && value.loginUrl) authorization.loginUrl = value.loginUrl;
+  }
+  if (value.status === 'completed' && value.account && typeof value.account === 'object') {
+    authorization.account = value.account;
+  }
+  return authorization;
+}
+
 function renderAuthorizationDialog() {
   const authorization = state.authorization;
   const started = Boolean(authorization);
+  const active = isAuthorizationActive(authorization);
   const pending = authorization?.status === 'pending';
   $('#authorization-start-state').classList.toggle('hidden', started);
   $('#authorization-progress-state').classList.toggle('hidden', !started);
   $('#authorization-error').textContent = '';
   if (!started) {
-    $('#authorization-start-button').disabled = false;
+    $('#authorization-start-button').disabled = state.authorizationClosing;
     $('#authorization-status').textContent = '';
     $('#authorization-link').removeAttribute('href');
     $('#authorization-link').classList.add('hidden');
-    $('#authorization-cancel-button').textContent = '取消';
+    $('#authorization-cancel-button').textContent = '关闭';
+    $('#authorization-cancel-button').disabled = state.authorizationClosing;
     return;
   }
   const link = $('#authorization-link');
@@ -526,60 +622,70 @@ function renderAuthorizationDialog() {
     link.classList.add('hidden');
   }
   $('#authorization-status').textContent = authorizationMessage(authorization);
-  $('#authorization-cancel-button').textContent = pending ? '取消' : '关闭';
+  $('#authorization-cancel-button').textContent = active ? '取消' : '关闭';
+  $('#authorization-cancel-button').disabled = state.authorizationClosing;
 }
 
 function openAuthorizationDialog() {
-  clearAuthorizationPolling();
-  state.authorization = null;
+  advanceAuthorizationFlow();
   renderAuthorizationDialog();
-  $('#account-authorization-dialog').showModal();
+  const dialog = $('#account-authorization-dialog');
+  if (!dialog.open) dialog.showModal();
   $('#authorization-start-button').focus();
 }
 
-function scheduleAuthorizationPoll() {
+function scheduleAuthorizationPoll(epoch = state.authorizationEpoch) {
   clearAuthorizationPolling();
-  if (state.authorization?.status !== 'pending') return;
+  if (!isCurrentAuthorizationFlow(epoch) || !isAuthorizationActive(state.authorization)) return;
+  const delay = state.authorization.status === 'starting' ? 750 : 5000;
   state.authorizationPollTimer = setTimeout(() => {
-    void pollAuthorization();
-  }, 5000);
+    void pollAuthorization(epoch);
+  }, delay);
 }
 
 async function startAuthorization() {
+  const epoch = state.authorizationEpoch;
+  if (!isCurrentAuthorizationFlow(epoch) || state.authorization) return;
   const button = $('#authorization-start-button');
   button.disabled = true;
   $('#authorization-error').textContent = '';
+  const controller = new AbortController();
+  state.authorizationController = controller;
   try {
     const payload = await api('/account-authorizations', {
       method: 'POST',
       body: '{}',
+      signal: controller.signal,
     });
-    state.authorization = payload.authorization || null;
-    if (!state.authorization?.id || !state.authorization?.loginUrl) {
-      throw new Error('授权服务返回了无效链接');
-    }
+    if (!isCurrentAuthorizationFlow(epoch)) return;
+    state.authorization = normalizeAuthorization(payload.authorization);
     renderAuthorizationDialog();
-    scheduleAuthorizationPoll();
+    scheduleAuthorizationPoll(epoch);
   } catch (error) {
-    if (error.status === 401) return showLogin();
+    if (!isCurrentAuthorizationFlow(epoch) || error.name === 'AbortError') return;
+    if (error.status === 401 || isCsrfFailure(error)) return showLogin();
     $('#authorization-error').textContent = error.message;
   } finally {
-    button.disabled = false;
+    if (state.authorizationController === controller) state.authorizationController = null;
+    if (isCurrentAuthorizationFlow(epoch) && !state.authorization) button.disabled = false;
   }
 }
 
-async function pollAuthorization() {
+async function pollAuthorization(epoch = state.authorizationEpoch) {
   const current = state.authorization;
-  if (!current?.id || current.status !== 'pending') return;
+  if (!current?.id || !isAuthorizationActive(current) || !isCurrentAuthorizationFlow(epoch, current.id)) return;
+  const authorizationId = current.id;
+  const controller = new AbortController();
+  state.authorizationController = controller;
   try {
-    const payload = await api(`/account-authorizations/${encodeURIComponent(current.id)}`, {
+    const payload = await api('/account-authorizations/' + encodeURIComponent(authorizationId), {
       method: 'POST',
       body: '{}',
+      signal: controller.signal,
     });
-    const next = payload.authorization || null;
-    if (!next?.id) throw new Error('授权状态无效');
-    state.authorization = { ...current, ...next };
-    if (state.authorization.status !== 'pending') {
+    if (!isCurrentAuthorizationFlow(epoch, authorizationId)) return;
+    state.authorization = normalizeAuthorization(payload.authorization);
+    if (!isAuthorizationActive(state.authorization)) {
       clearAuthorizationPolling();
       if (state.authorization.status === 'completed') {
         toast('账号授权完成，配置代理后即可启用');
@@ -589,42 +695,68 @@ async function pollAuthorization() {
         toast('账号授权完成，但保存失败，请重试', 'error');
       }
       await Promise.all([loadAccounts(), loadSystem()]);
+      if (!isCurrentAuthorizationFlow(epoch, authorizationId)) return;
     }
     renderAuthorizationDialog();
-    scheduleAuthorizationPoll();
+    scheduleAuthorizationPoll(epoch);
   } catch (error) {
-    if (error.status === 401) return showLogin();
-    if (error.status === 404 || error.status === 403) {
+    if (!isCurrentAuthorizationFlow(epoch, authorizationId) || error.name === 'AbortError') return;
+    if (error.status === 401 || isCsrfFailure(error)) return showLogin();
+    if (error.status === 404) {
       clearAuthorizationPolling();
       state.authorization = {
-        ...current,
+        id: authorizationId,
         status: 'expired',
+        createdAt: current.createdAt,
         message: '授权状态已失效，请重新开始。',
       };
       renderAuthorizationDialog();
       return;
     }
     $('#authorization-error').textContent = error.message || '无法更新授权状态';
-    scheduleAuthorizationPoll();
+    scheduleAuthorizationPoll(epoch);
+  } finally {
+    if (state.authorizationController === controller) state.authorizationController = null;
   }
 }
 
 async function closeAuthorizationDialog() {
+  if (state.authorizationClosing) return;
   const authorization = state.authorization;
-  clearAuthorizationPolling();
-  if (authorization?.id && authorization.status === 'pending') {
+  const epoch = advanceAuthorizationFlow({ clear: false });
+  state.authorizationClosing = true;
+  $('#authorization-cancel-button').disabled = true;
+  if (authorization?.id && isAuthorizationActive(authorization)) {
+    const controller = new AbortController();
+    state.authorizationController = controller;
     try {
-      await api(`/account-authorizations/${encodeURIComponent(authorization.id)}`, {
+      await api('/account-authorizations/' + encodeURIComponent(authorization.id), {
         method: 'DELETE',
         body: '{}',
+        signal: controller.signal,
       });
     } catch (error) {
-      if (error.status === 401) showLogin();
-      toast(error.message || '无法取消授权', 'error');
+      if (state.authorizationEpoch !== epoch) return;
+      if (error.status === 401 || isCsrfFailure(error)) {
+        showLogin();
+        return;
+      }
+      if (error.status !== 404) {
+        state.authorization = authorization;
+        state.authorizationClosing = false;
+        renderAuthorizationDialog();
+        $('#authorization-error').textContent = error.message || '无法取消授权，请重试';
+        scheduleAuthorizationPoll(epoch);
+        return;
+      }
+    } finally {
+      if (state.authorizationController === controller) state.authorizationController = null;
     }
   }
+  if (state.authorizationEpoch !== epoch) return;
   state.authorization = null;
-  $('#account-authorization-dialog').close();
+  state.authorizationClosing = false;
+  closeDialog('account-authorization-dialog');
 }
 
 async function saveAccount(event) {

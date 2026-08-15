@@ -22,10 +22,10 @@ export class FreebuffAuthorizationError extends Error {
 function boundedText(value, field, max, { required = false } = {}) {
   const text = typeof value === 'string' ? value.trim() : '';
   if (required && !text) {
-    throw new FreebuffAuthorizationError(`Freebuff authorization response is missing ${field}`, 502, 'FREEBUFF_AUTH_RESPONSE_INVALID');
+    throw new FreebuffAuthorizationError('Freebuff authorization response is missing ' + field, 502, 'FREEBUFF_AUTH_RESPONSE_INVALID');
   }
   if (text.length > max || /[\r\n\0]/.test(text)) {
-    throw new FreebuffAuthorizationError(`Freebuff authorization response has invalid ${field}`, 502, 'FREEBUFF_AUTH_RESPONSE_INVALID');
+    throw new FreebuffAuthorizationError('Freebuff authorization response has invalid ' + field, 502, 'FREEBUFF_AUTH_RESPONSE_INVALID');
   }
   return text;
 }
@@ -43,8 +43,8 @@ function displayName(user, authorizationId) {
   const email = displayEmail(user);
   if (email) return email.slice(0, 80);
   const upstreamId = typeof user?.id === 'string' ? user.id.trim().replace(/[\r\n\0]/g, '') : '';
-  if (upstreamId) return `Freebuff ${upstreamId.slice(0, 64)}`;
-  return `Freebuff ${authorizationId.slice(0, 8)}`;
+  if (upstreamId) return 'Freebuff ' + upstreamId.slice(0, 64);
+  return 'Freebuff ' + authorizationId.slice(0, 8);
 }
 
 function publicAccount(account) {
@@ -71,8 +71,16 @@ function safeNow(now) {
 
 function safeDuration(value, fallback, name) {
   const parsed = Number(value === undefined ? fallback : value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new TypeError(`${name} must be a positive integer`);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new TypeError(name + ' must be a positive integer');
   return parsed;
+}
+
+function awaitingUpstream(status) {
+  return status === 'starting' || status === 'pending';
+}
+
+function inFlight(status) {
+  return awaitingUpstream(status) || status === 'completing';
 }
 
 export class FreebuffAuthorizer {
@@ -87,8 +95,8 @@ export class FreebuffAuthorizer {
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   } = {}) {
-    if (!accountService || typeof accountService.create !== 'function') {
-      throw new TypeError('accountService.create is required');
+    if (!accountService || typeof accountService.create !== 'function' || typeof accountService.delete !== 'function') {
+      throw new TypeError('accountService.create and accountService.delete are required');
     }
     if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function');
     if (typeof now !== 'function') throw new TypeError('now must be a function');
@@ -121,7 +129,7 @@ export class FreebuffAuthorizer {
   #fingerprintId() {
     const random = this.randomBytesFn(6).toString('base64url').slice(0, 8);
     if (!/^[A-Za-z0-9_-]{8}$/.test(random)) throw new Error('random fingerprint generation failed');
-    return `codebuff-cli-${random}`;
+    return 'codebuff-cli-' + random;
   }
 
   #url(path, query = null) {
@@ -132,8 +140,11 @@ export class FreebuffAuthorizer {
     return url;
   }
 
-  async #request(method, path, { body = undefined, query = null } = {}) {
+  async #request(method, path, { body = undefined, query = null, signal: externalSignal = null } = {}) {
     const controller = new AbortController();
+    const abortFromExternal = () => controller.abort(externalSignal?.reason);
+    if (externalSignal?.aborted) abortFromExternal();
+    else externalSignal?.addEventListener?.('abort', abortFromExternal, { once: true });
     const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     try {
       const headers = {
@@ -166,6 +177,7 @@ export class FreebuffAuthorizer {
       throw new FreebuffAuthorizationError('Freebuff authorization service is temporarily unavailable', 502, 'FREEBUFF_AUTH_UPSTREAM_UNAVAILABLE');
     } finally {
       clearTimeout(timer);
+      externalSignal?.removeEventListener?.('abort', abortFromExternal);
     }
   }
 
@@ -177,6 +189,10 @@ export class FreebuffAuthorizer {
     return record;
   }
 
+  #matches(record, generation, status) {
+    return record.generation === generation && record.status === status;
+  }
+
   #clearSensitive(record) {
     record.loginUrl = null;
     record.fingerprintId = null;
@@ -185,9 +201,29 @@ export class FreebuffAuthorizer {
   }
 
   #finish(record, status) {
+    if (!inFlight(record.status)) return false;
+    record.generation += 1;
     record.status = status;
     record.finishedAt = this.#now();
+    record.terminationStatus = null;
+    const startController = record.startController;
+    const pollController = record.pollController;
+    record.startController = null;
+    record.pollController = null;
     this.#clearSensitive(record);
+    startController?.abort();
+    pollController?.abort();
+    return true;
+  }
+
+  #expire(record) {
+    if (record.status === 'completing') {
+      record.terminationStatus ||= 'expired';
+      return;
+    }
+    if (this.#finish(record, 'expired')) {
+      this.#appendAudit(record, 'account.authorization_expired', 'Freebuff web authorization expired');
+    }
   }
 
   #summary(record) {
@@ -198,11 +234,19 @@ export class FreebuffAuthorizer {
     };
     if (record.status === 'completed' && record.account) result.account = publicAccount(record.account);
     if (record.status === 'pending' && record.retrying) result.retrying = true;
+    if (record.status === 'starting') result.message = 'preparing authorization link';
+    if (record.status === 'completing') result.message = 'saving authorized account';
     if (record.status === 'expired') result.message = 'authorization expired; start again';
     if (record.status === 'cancelled') result.message = 'authorization cancelled';
     if (record.status === 'duplicate') result.message = 'this Freebuff account is already managed';
     if (record.status === 'failed') result.message = 'unable to save the authorized Freebuff account';
     return result;
+  }
+
+  #details(record) {
+    const authorization = this.#summary(record);
+    if (record.status === 'pending' && record.loginUrl) authorization.loginUrl = record.loginUrl;
+    return { authorization };
   }
 
   #appendAudit(record, action, summary, accountId = null) {
@@ -219,11 +263,9 @@ export class FreebuffAuthorizer {
   #cleanup() {
     const now = this.#now();
     for (const record of this.records.values()) {
-      if (record.status === 'pending' && now >= record.deadlineAt) {
-        this.#finish(record, 'expired');
-        this.#appendAudit(record, 'account.authorization_expired', 'Freebuff web authorization expired');
-      }
-      if (record.status !== 'pending' && record.finishedAt !== null && now - record.finishedAt >= RESULT_RETENTION_MS) {
+      if (awaitingUpstream(record.status) && now >= record.deadlineAt) this.#expire(record);
+      if (record.status === 'completing' && now >= record.deadlineAt) record.terminationStatus ||= 'expired';
+      if (!inFlight(record.status) && record.finishedAt !== null && now - record.finishedAt >= RESULT_RETENTION_MS) {
         this.records.delete(record.id);
       }
     }
@@ -233,7 +275,7 @@ export class FreebuffAuthorizer {
     this.#cleanup();
     if (this.records.size < MAX_PENDING_AUTHORIZATIONS) return;
     const removable = [...this.records.values()]
-      .filter((record) => record.status !== 'pending')
+      .filter((record) => !inFlight(record.status))
       .sort((left, right) => left.finishedAt - right.finishedAt)[0];
     if (removable) this.records.delete(removable.id);
     if (this.records.size >= MAX_PENDING_AUTHORIZATIONS) {
@@ -241,68 +283,129 @@ export class FreebuffAuthorizer {
     }
   }
 
+  #deadlineAt(session, now) {
+    const sessionExpiresAt = Number(session?.expiresAt) * 1000;
+    const sessionDeadline = Number.isFinite(sessionExpiresAt) ? sessionExpiresAt : Number.POSITIVE_INFINITY;
+    return Math.min(now + this.pollTimeoutMs, sessionDeadline);
+  }
+
+  #launchStart(record) {
+    let promise;
+    promise = this.#beginStart(record)
+      .catch(() => {
+        if (awaitingUpstream(record.status)) {
+          this.#finish(record, 'failed');
+          this.#appendAudit(record, 'account.authorization_failed', 'Unable to prepare Freebuff web authorization');
+        }
+      })
+      .finally(() => {
+        if (record.startPromise === promise) record.startPromise = null;
+      });
+    record.startPromise = promise;
+  }
+
+  async #beginStart(record) {
+    const generation = record.generation;
+    const controller = new AbortController();
+    record.startController = controller;
+    try {
+      const { status, data } = await this.#request('POST', '/api/auth/cli/code', {
+        body: { fingerprintId: record.fingerprintId },
+        signal: controller.signal,
+      });
+      if (!this.#matches(record, generation, 'starting')) return;
+      const upstream = objectValue(data);
+      if (status !== 200 || !upstream) {
+        this.#finish(record, 'failed');
+        this.#appendAudit(record, 'account.authorization_failed', 'Unable to prepare Freebuff web authorization');
+        return;
+      }
+
+      const loginUrl = boundedText(upstream.loginUrl, 'loginUrl', 2048, { required: true });
+      let parsedLoginUrl;
+      try {
+        parsedLoginUrl = new URL(loginUrl);
+      } catch {
+        this.#finish(record, 'failed');
+        this.#appendAudit(record, 'account.authorization_failed', 'Freebuff authorization returned an invalid login URL');
+        return;
+      }
+      if (
+        parsedLoginUrl.origin !== this.baseUrl.origin
+        || parsedLoginUrl.pathname !== '/login'
+        || !parsedLoginUrl.searchParams.get('auth_code')
+      ) {
+        this.#finish(record, 'failed');
+        this.#appendAudit(record, 'account.authorization_failed', 'Freebuff authorization returned an unexpected login URL');
+        return;
+      }
+
+      const fingerprintHash = boundedText(upstream.fingerprintHash, 'fingerprintHash', 512, { required: true });
+      const upstreamExpiresAt = boundedText(String(upstream.expiresAt ?? ''), 'expiresAt', 512, { required: true });
+      if (!this.#matches(record, generation, 'starting')) return;
+      if (this.#now() >= record.deadlineAt) {
+        this.#expire(record);
+        return;
+      }
+      record.loginUrl = parsedLoginUrl.toString();
+      record.fingerprintHash = fingerprintHash;
+      record.upstreamExpiresAt = upstreamExpiresAt;
+      record.retrying = false;
+      record.nextPollAt = this.#now();
+      record.status = 'pending';
+      record.generation += 1;
+    } catch {
+      if (this.#matches(record, generation, 'starting')) {
+        this.#finish(record, 'failed');
+        this.#appendAudit(record, 'account.authorization_failed', 'Freebuff web authorization service is temporarily unavailable');
+      }
+    } finally {
+      if (record.startController === controller) record.startController = null;
+    }
+  }
+
   async start(session) {
     const owner = this.#owner(session);
     this.#cleanup();
-    if ([...this.records.values()].some((record) => record.owner === owner && record.status === 'pending')) {
-      throw new FreebuffAuthorizationError('an authorization request is already pending', 409, 'FREEBUFF_AUTH_ALREADY_PENDING');
-    }
+    const existing = [...this.records.values()].find((record) => record.owner === owner && inFlight(record.status));
+    if (existing) return this.#details(existing);
     this.#ensureCapacity();
 
-    const fingerprintId = this.#fingerprintId();
-    const { status, data } = await this.#request('POST', '/api/auth/cli/code', {
-      body: { fingerprintId },
-    });
-    const upstream = objectValue(data);
-    if (status !== 200 || !upstream) {
-      throw new FreebuffAuthorizationError('could not start Freebuff authorization', 502, 'FREEBUFF_AUTH_START_FAILED');
-    }
-
-    const loginUrl = boundedText(upstream.loginUrl, 'loginUrl', 2048, { required: true });
-    let parsedLoginUrl;
-    try {
-      parsedLoginUrl = new URL(loginUrl);
-    } catch {
-      throw new FreebuffAuthorizationError('Freebuff authorization returned an invalid login URL', 502, 'FREEBUFF_AUTH_RESPONSE_INVALID');
-    }
-    if (
-      parsedLoginUrl.origin !== this.baseUrl.origin
-      || parsedLoginUrl.pathname !== '/login'
-      || !parsedLoginUrl.searchParams.get('auth_code')
-    ) {
-      throw new FreebuffAuthorizationError('Freebuff authorization returned an unexpected login URL', 502, 'FREEBUFF_AUTH_RESPONSE_INVALID');
-    }
-
-    const fingerprintHash = boundedText(upstream.fingerprintHash, 'fingerprintHash', 512, { required: true });
-    const upstreamExpiresAt = boundedText(String(upstream.expiresAt ?? ''), 'expiresAt', 512, { required: true });
     const now = this.#now();
+    const deadlineAt = this.#deadlineAt(session, now);
+    if (deadlineAt <= now) {
+      throw new FreebuffAuthorizationError('administrator session has expired', 401, 'ADMIN_UNAUTHORIZED');
+    }
     const record = {
       id: this.randomId(),
       owner,
       actor: session.actor || session.username || 'admin',
-      status: 'pending',
+      status: 'starting',
       createdAt: now,
       finishedAt: null,
-      deadlineAt: now + this.pollTimeoutMs,
+      deadlineAt,
       nextPollAt: now,
       retrying: false,
-      loginUrl: parsedLoginUrl.toString(),
-      fingerprintId,
-      fingerprintHash,
-      upstreamExpiresAt,
+      loginUrl: null,
+      fingerprintId: this.#fingerprintId(),
+      fingerprintHash: null,
+      upstreamExpiresAt: null,
       account: null,
+      generation: 1,
+      terminationStatus: null,
+      startPromise: null,
+      startController: null,
+      pollPromise: null,
+      pollController: null,
     };
     this.records.set(record.id, record);
     this.#appendAudit(record, 'account.authorization_started', 'Started Freebuff web authorization');
-    return {
-      authorization: {
-        ...this.#summary(record),
-        loginUrl: record.loginUrl,
-      },
-    };
+    this.#launchStart(record);
+    return this.#details(record);
   }
 
-  async #complete(record, data) {
+  async #complete(record, data, generation) {
+    if (!this.#matches(record, generation, 'pending')) return;
     const user = objectValue(data)?.user;
     if (!objectValue(user)) {
       this.#finish(record, 'failed');
@@ -317,7 +420,11 @@ export class FreebuffAuthorizer {
       this.#appendAudit(record, 'account.authorization_failed', 'Freebuff authorization returned an invalid credential');
       return;
     }
+    if (!this.#matches(record, generation, 'pending')) return;
 
+    record.status = 'completing';
+    record.generation += 1;
+    const completionGeneration = record.generation;
     try {
       const account = await this.accountService.create({
         name: displayName(user, record.id),
@@ -325,17 +432,51 @@ export class FreebuffAuthorizer {
         authToken,
         enabled: false,
       }, record.actor);
+      if (!this.#matches(record, completionGeneration, 'completing')) return;
+      if (record.terminationStatus) {
+        const terminalStatus = record.terminationStatus;
+        try {
+          await this.accountService.delete(account.id, record.actor);
+          if (!this.#matches(record, completionGeneration, 'completing')) return;
+          this.#finish(record, terminalStatus);
+          this.#appendAudit(
+            record,
+            terminalStatus === 'expired' ? 'account.authorization_expired' : 'account.authorization_cancelled',
+            terminalStatus === 'expired'
+              ? 'Freebuff web authorization expired before the account could be saved'
+              : 'Cancelled Freebuff web authorization before the account could be saved',
+          );
+        } catch {
+          if (this.#matches(record, completionGeneration, 'completing')) {
+            this.#finish(record, 'failed');
+            this.#appendAudit(record, 'account.authorization_failed', 'Unable to roll back an interrupted Freebuff authorization');
+          }
+        }
+        return;
+      }
       record.account = publicAccount(account);
       this.#finish(record, 'completed');
-      this.#appendAudit(record, 'account.authorization_completed', `Authorized account ${record.account.name}`, record.account.id);
+      this.#appendAudit(record, 'account.authorization_completed', 'Authorized account ' + record.account.name, record.account.id);
     } catch (error) {
-      this.#finish(record, error?.code === 'ACCOUNT_DUPLICATE' ? 'duplicate' : 'failed');
+      if (!this.#matches(record, completionGeneration, 'completing')) return;
+      const terminalStatus = record.terminationStatus || (error?.code === 'ACCOUNT_DUPLICATE' ? 'duplicate' : 'failed');
+      this.#finish(record, terminalStatus);
       this.#appendAudit(
         record,
-        error?.code === 'ACCOUNT_DUPLICATE' ? 'account.authorization_duplicate' : 'account.authorization_failed',
-        error?.code === 'ACCOUNT_DUPLICATE'
-          ? 'Authorized Freebuff account is already managed'
-          : 'Unable to save authorized Freebuff account',
+        terminalStatus === 'cancelled'
+          ? 'account.authorization_cancelled'
+          : terminalStatus === 'expired'
+            ? 'account.authorization_expired'
+            : error?.code === 'ACCOUNT_DUPLICATE'
+              ? 'account.authorization_duplicate'
+              : 'account.authorization_failed',
+        terminalStatus === 'cancelled'
+          ? 'Cancelled Freebuff web authorization'
+          : terminalStatus === 'expired'
+            ? 'Freebuff web authorization expired'
+            : error?.code === 'ACCOUNT_DUPLICATE'
+              ? 'Authorized Freebuff account is already managed'
+              : 'Unable to save authorized Freebuff account',
       );
     }
   }
@@ -344,41 +485,84 @@ export class FreebuffAuthorizer {
     this.#cleanup();
     const record = this.#find(id, session);
     const now = this.#now();
-    if (record.status !== 'pending' || now < record.nextPollAt) {
-      return { authorization: this.#summary(record) };
+    if (record.status === 'starting' || record.status === 'completing' || record.status !== 'pending') {
+      return this.#details(record);
     }
-    record.nextPollAt = now + this.pollIntervalMs;
-    try {
-      const { status, data } = await this.#request('GET', '/api/auth/cli/status', {
-        query: {
-          fingerprintId: record.fingerprintId,
-          fingerprintHash: record.fingerprintHash,
-          expiresAt: record.upstreamExpiresAt,
-        },
-      });
-      if (status === 200) {
-        await this.#complete(record, data);
-      } else if (status === 400) {
-        this.#finish(record, 'expired');
-        this.#appendAudit(record, 'account.authorization_expired', 'Freebuff web authorization expired');
-      } else if (status === 401) {
-        record.retrying = false;
-      } else {
-        record.retrying = true;
+    if (record.pollPromise) return record.pollPromise;
+    if (now < record.nextPollAt) return this.#details(record);
+
+    const generation = record.generation;
+    const controller = new AbortController();
+    const pollPromise = (async () => {
+      record.nextPollAt = now + this.pollIntervalMs;
+      record.pollController = controller;
+      try {
+        const { status, data } = await this.#request('GET', '/api/auth/cli/status', {
+          query: {
+            fingerprintId: record.fingerprintId,
+            fingerprintHash: record.fingerprintHash,
+            expiresAt: record.upstreamExpiresAt,
+          },
+          signal: controller.signal,
+        });
+        if (!this.#matches(record, generation, 'pending')) return this.#details(record);
+        if (this.#now() >= record.deadlineAt) {
+          this.#expire(record);
+        } else if (status === 200) {
+          await this.#complete(record, data, generation);
+        } else if (status === 400) {
+          this.#expire(record);
+        } else if (status === 401) {
+          record.retrying = false;
+        } else {
+          record.retrying = true;
+        }
+      } catch {
+        if (this.#matches(record, generation, 'pending')) record.retrying = true;
+      } finally {
+        if (record.pollController === controller) record.pollController = null;
       }
-    } catch {
-      record.retrying = true;
+      return this.#details(record);
+    })();
+    record.pollPromise = pollPromise;
+
+    try {
+      return await pollPromise;
+    } finally {
+      if (record.pollPromise === pollPromise) record.pollPromise = null;
     }
-    return { authorization: this.#summary(record) };
   }
 
-  cancel(id, session) {
+  async #terminate(record, status, summary) {
+    if (record.status === 'completing') {
+      record.terminationStatus ||= status;
+      if (record.pollPromise) await record.pollPromise;
+      return this.#details(record);
+    }
+    if (awaitingUpstream(record.status) && this.#finish(record, status)) {
+      this.#appendAudit(record, status === 'expired' ? 'account.authorization_expired' : 'account.authorization_cancelled', summary);
+    }
+    return this.#details(record);
+  }
+
+  async cancel(id, session) {
     this.#cleanup();
     const record = this.#find(id, session);
-    if (record.status === 'pending') {
-      this.#finish(record, 'cancelled');
-      this.#appendAudit(record, 'account.authorization_cancelled', 'Cancelled Freebuff web authorization');
-    }
-    return { authorization: this.#summary(record) };
+    return this.#terminate(record, 'cancelled', 'Cancelled Freebuff web authorization');
+  }
+
+  async cancelBySession(session) {
+    const owner = this.#owner(session);
+    this.#cleanup();
+    const records = [...this.records.values()].filter((record) => record.owner === owner && inFlight(record.status));
+    await Promise.all(records.map((record) => this.#terminate(record, 'cancelled', 'Cancelled Freebuff web authorization after administrator session revocation')));
+    return { cancelled: records.length };
+  }
+
+  async cancelAll() {
+    this.#cleanup();
+    const records = [...this.records.values()].filter((record) => inFlight(record.status));
+    await Promise.all(records.map((record) => this.#terminate(record, 'cancelled', 'Cancelled Freebuff web authorization after administrator session revocation')));
+    return { cancelled: records.length };
   }
 }

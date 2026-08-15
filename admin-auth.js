@@ -321,10 +321,11 @@ export class AdminAuth {
     ];
   }
 
-  async changePassword(currentPassword, nextPassword, session) {
+  async changePassword(currentPassword, nextPassword, session, { beforeSessionRevocation = null } = {}) {
     const valid = await verifyPassword(currentPassword, this.store.getSetting('admin_password_hash'));
     if (!valid) throw new AdminAuthError('current password is incorrect', 403, 'ADMIN_PASSWORD_INCORRECT');
     const nextHash = await hashPassword(nextPassword);
+    if (typeof beforeSessionRevocation === 'function') await beforeSessionRevocation();
     this.store.transaction(() => {
       this.store.setSetting('admin_password_hash', nextHash);
       this.store.deleteAllSessions();

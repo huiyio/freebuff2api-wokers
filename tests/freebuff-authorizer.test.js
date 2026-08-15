@@ -9,10 +9,16 @@ function jsonResponse(status, data) {
   });
 }
 
+function nextTick() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 function fixture(responses, options = {}) {
   let now = 1_000;
   const requests = [];
   const created = [];
+  const deleted = [];
+  const activeAccounts = new Map();
   const audit = [];
   const accountService = {
     store: {
@@ -23,8 +29,9 @@ function fixture(responses, options = {}) {
     async create(input, actor) {
       created.push({ input, actor });
       if (options.createError) throw options.createError;
-      return {
-        id: `account-${created.length}`,
+      const id = 'account-' + created.length;
+      const account = {
+        id,
         name: input.name,
         email: input.email,
         enabled: input.enabled,
@@ -32,31 +39,44 @@ function fixture(responses, options = {}) {
         hasProxy: false,
         authToken: input.authToken,
       };
+      activeAccounts.set(id, account);
+      return account;
+    },
+    async delete(id, actor) {
+      deleted.push({ id, actor });
+      activeAccounts.delete(id);
     },
   };
+  const defaultResponse = () => {
+    const next = responses.shift();
+    if (next instanceof Error) throw next;
+    return next;
+  };
+  const fetchImpl = options.fetchImpl || (async () => defaultResponse());
   const authorizer = new FreebuffAuthorizer({
     accountService,
     now: () => now,
     randomBytesFn: () => Buffer.from([1, 2, 3, 4, 5, 6]),
-    randomId: () => 'authorization-1',
+    randomId: options.randomId || (() => 'authorization-1'),
+    pollTimeoutMs: options.pollTimeoutMs || 5 * 60 * 1000,
     pollIntervalMs: 5_000,
     fetchImpl: async (url, init) => {
       requests.push({ url: String(url), init });
-      const next = responses.shift();
-      if (next instanceof Error) throw next;
-      return next;
+      return fetchImpl(url, init, defaultResponse);
     },
   });
   return {
     authorizer,
     created,
+    deleted,
+    activeAccounts,
     audit,
     requests,
     advance(milliseconds) { now += milliseconds; },
   };
 }
 
-const session = { sessionHash: 'session-a', actor: 'admin' };
+const session = { sessionHash: 'session-a', actor: 'admin', expiresAt: 2_000 };
 
 test('stores a successful web authorization as a disabled encrypted account without exposing its token', async () => {
   const token = 'authorized-freebuff-token-123456';
@@ -74,16 +94,17 @@ test('stores a successful web authorization as a disabled encrypted account with
   ]);
 
   const started = await setup.authorizer.start(session);
-  assert.equal(started.authorization.loginUrl, loginUrl);
-  assert.equal(started.authorization.status, 'pending');
+  assert.equal(started.authorization.status, 'starting');
+  assert.equal(started.authorization.loginUrl, undefined);
+  await nextTick();
+  const pending = await setup.authorizer.poll(started.authorization.id, session);
+  assert.equal(pending.authorization.status, 'pending');
+  assert.equal(pending.authorization.loginUrl, loginUrl);
+  assert.equal(setup.created.length, 0);
   assert.match(setup.requests[0].url, /\/api\/auth\/cli\/code$/);
   assert.equal(setup.requests[0].init.method, 'POST');
   assert.match(setup.requests[0].init.headers['user-agent'], /Chrome\/125/);
   assert.match(JSON.parse(setup.requests[0].init.body).fingerprintId, /^codebuff-cli-[A-Za-z0-9_-]{8}$/);
-
-  const pending = await setup.authorizer.poll(started.authorization.id, session);
-  assert.equal(pending.authorization.status, 'pending');
-  assert.equal(setup.created.length, 0);
 
   setup.advance(5_000);
   const completed = await setup.authorizer.poll(started.authorization.id, session);
@@ -100,6 +121,7 @@ test('stores a successful web authorization as a disabled encrypted account with
     },
     actor: 'admin',
   });
+  assert.equal(setup.activeAccounts.size, 1);
   assert.doesNotMatch(JSON.stringify(completed), new RegExp(token));
   assert.doesNotMatch(JSON.stringify(completed), /one-time-code|fingerprint-hash-value/);
   assert.doesNotMatch(JSON.stringify(setup.audit), new RegExp(token));
@@ -123,7 +145,7 @@ test('binds authorization records to one administrator session and supports canc
     (error) => error instanceof FreebuffAuthorizationError && error.status === 404,
   );
 
-  const cancelled = setup.authorizer.cancel(started.authorization.id, session);
+  const cancelled = await setup.authorizer.cancel(started.authorization.id, session);
   assert.equal(cancelled.authorization.status, 'cancelled');
   assert.doesNotMatch(JSON.stringify(cancelled), /one-time-code|fingerprint-hash-value/);
   assert.match(JSON.stringify(setup.audit), /account.authorization_cancelled/);
@@ -139,9 +161,10 @@ test('expires invalid upstream authorization responses without retaining credent
     jsonResponse(400, { message: 'expired' }),
   ]);
   const started = await setup.authorizer.start(session);
+  await nextTick();
   const expired = await setup.authorizer.poll(started.authorization.id, session);
   assert.equal(expired.authorization.status, 'expired');
-  assert.equal(setup.created.length, 0);
+  assert.equal(setup.activeAccounts.size, 0);
   assert.doesNotMatch(JSON.stringify(expired), /one-time-code|fingerprint-hash-value/);
   assert.match(JSON.stringify(setup.audit), /account.authorization_expired/);
 });
@@ -156,9 +179,10 @@ test('does not save a malformed or duplicate upstream credential', async () => {
     jsonResponse(200, { user: { email: 'bad@example.com' } }),
   ]);
   const startedMalformed = await malformed.authorizer.start(session);
+  await nextTick();
   const malformedResult = await malformed.authorizer.poll(startedMalformed.authorization.id, session);
   assert.equal(malformedResult.authorization.status, 'failed');
-  assert.equal(malformed.created.length, 0);
+  assert.equal(malformed.activeAccounts.size, 0);
 
   const duplicateError = Object.assign(new Error('duplicate'), { code: 'ACCOUNT_DUPLICATE' });
   const duplicate = fixture([
@@ -170,12 +194,14 @@ test('does not save a malformed or duplicate upstream credential', async () => {
     jsonResponse(200, { user: { email: 'duplicate@example.com', authToken: 'duplicate-token-12345' } }),
   ], { createError: duplicateError });
   const startedDuplicate = await duplicate.authorizer.start(session);
+  await nextTick();
   const duplicateResult = await duplicate.authorizer.poll(startedDuplicate.authorization.id, session);
   assert.equal(duplicateResult.authorization.status, 'duplicate');
+  assert.equal(duplicate.activeAccounts.size, 0);
   assert.doesNotMatch(JSON.stringify(duplicateResult), /duplicate-token-12345/);
 });
 
-test('rejects an unexpected upstream login URL before keeping a pending record', async () => {
+test('turns an unexpected upstream login URL into a terminal result without retaining a record secret', async () => {
   const setup = fixture([
     jsonResponse(200, {
       loginUrl: 'https://example.invalid/login?auth_code=one-time-code',
@@ -183,8 +209,128 @@ test('rejects an unexpected upstream login URL before keeping a pending record',
       expiresAt: '2026-08-16T00:00:00.000Z',
     }),
   ]);
-  await assert.rejects(
-    setup.authorizer.start(session),
-    (error) => error instanceof FreebuffAuthorizationError && error.code === 'FREEBUFF_AUTH_RESPONSE_INVALID',
-  );
+  const started = await setup.authorizer.start(session);
+  await nextTick();
+  const result = await setup.authorizer.poll(started.authorization.id, session);
+  assert.equal(result.authorization.status, 'failed');
+  assert.doesNotMatch(JSON.stringify(result), /one-time-code|fingerprint-hash-value/);
+});
+
+test('coalesces concurrent starts for one administrator session', async () => {
+  let resolveStart;
+  const startResponse = new Promise((resolve) => { resolveStart = resolve; });
+  const setup = fixture([], {
+    fetchImpl: async (url, init, defaultResponse) => {
+      if (new URL(url).pathname.endsWith('/api/auth/cli/code')) return startResponse;
+      return defaultResponse();
+    },
+  });
+  const firstPromise = setup.authorizer.start(session);
+  await nextTick();
+  const second = await setup.authorizer.start(session);
+  assert.equal(second.authorization.id, (await firstPromise).authorization.id);
+  assert.equal(setup.requests.filter((request) => request.url.endsWith('/api/auth/cli/code')).length, 1);
+  resolveStart(jsonResponse(200, {
+    loginUrl: 'https://www.codebuff.com/login?auth_code=one-time-code',
+    fingerprintHash: 'fingerprint-hash-value',
+    expiresAt: '2026-08-16T00:00:00.000Z',
+  }));
+  await nextTick();
+  const ready = await setup.authorizer.poll(second.authorization.id, session);
+  assert.equal(ready.authorization.status, 'pending');
+});
+
+test('cancellation is a terminal barrier for a blocked status poll', async () => {
+  let resolveStatus;
+  const statusResponse = new Promise((resolve) => { resolveStatus = resolve; });
+  const setup = fixture([
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=one-time-code',
+      fingerprintHash: 'fingerprint-hash-value',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+  ], {
+    fetchImpl: async (url, init, defaultResponse) => {
+      if (new URL(url).pathname.endsWith('/api/auth/cli/status')) return statusResponse;
+      return defaultResponse();
+    },
+  });
+  const started = await setup.authorizer.start(session);
+  await nextTick();
+  const polling = setup.authorizer.poll(started.authorization.id, session);
+  await nextTick();
+  const cancelling = setup.authorizer.cancel(started.authorization.id, session);
+  assert.equal(setup.requests.at(-1).init.signal.aborted, true);
+  resolveStatus(jsonResponse(200, {
+    user: { email: 'cancelled@example.com', authToken: 'cancelled-token-12345' },
+  }));
+  const [polled, cancelled] = await Promise.all([polling, cancelling]);
+  assert.equal(polled.authorization.status, 'cancelled');
+  assert.equal(cancelled.authorization.status, 'cancelled');
+  assert.equal(setup.activeAccounts.size, 0);
+  assert.equal(setup.created.length, 0);
+});
+
+test('expiry is a terminal barrier for a blocked status poll', async () => {
+  let resolveStatus;
+  const statusResponse = new Promise((resolve) => { resolveStatus = resolve; });
+  const setup = fixture([
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=one-time-code',
+      fingerprintHash: 'fingerprint-hash-value',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+  ], {
+    pollTimeoutMs: 5_000,
+    fetchImpl: async (url, init, defaultResponse) => {
+      if (new URL(url).pathname.endsWith('/api/auth/cli/status')) return statusResponse;
+      return defaultResponse();
+    },
+  });
+  const started = await setup.authorizer.start(session);
+  await nextTick();
+  const polling = setup.authorizer.poll(started.authorization.id, session);
+  await nextTick();
+  setup.advance(5_001);
+  const expired = await setup.authorizer.poll(started.authorization.id, session);
+  assert.equal(expired.authorization.status, 'expired');
+  assert.equal(setup.requests.at(-1).init.signal.aborted, true);
+  resolveStatus(jsonResponse(200, {
+    user: { email: 'expired@example.com', authToken: 'expired-token-12345' },
+  }));
+  const result = await polling;
+  assert.equal(result.authorization.status, 'expired');
+  assert.equal(setup.activeAccounts.size, 0);
+  assert.equal(setup.created.length, 0);
+});
+
+test('parallel polls share one upstream request and one account write', async () => {
+  let resolveStatus;
+  const statusResponse = new Promise((resolve) => { resolveStatus = resolve; });
+  const setup = fixture([
+    jsonResponse(200, {
+      loginUrl: 'https://www.codebuff.com/login?auth_code=one-time-code',
+      fingerprintHash: 'fingerprint-hash-value',
+      expiresAt: '2026-08-16T00:00:00.000Z',
+    }),
+  ], {
+    fetchImpl: async (url, init, defaultResponse) => {
+      if (new URL(url).pathname.endsWith('/api/auth/cli/status')) return statusResponse;
+      return defaultResponse();
+    },
+  });
+  const started = await setup.authorizer.start(session);
+  await nextTick();
+  setup.advance(5_000);
+  const first = setup.authorizer.poll(started.authorization.id, session);
+  const second = setup.authorizer.poll(started.authorization.id, session);
+  resolveStatus(jsonResponse(200, {
+    user: { email: 'parallel@example.com', authToken: 'parallel-token-12345' },
+  }));
+  const [left, right] = await Promise.all([first, second]);
+  assert.equal(left.authorization.status, 'completed');
+  assert.equal(right.authorization.status, 'completed');
+  assert.equal(setup.activeAccounts.size, 1);
+  assert.equal(setup.created.length, 1);
+  assert.equal(setup.requests.filter((request) => new URL(request.url).pathname.endsWith('/api/auth/cli/status')).length, 1);
 });
