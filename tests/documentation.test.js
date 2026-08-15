@@ -1,0 +1,40 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const read = (name) => readFileSync(resolve(root, name), 'utf8');
+
+test('project responsibility and security documents are present and linked', () => {
+  const required = [
+    'LEGAL_NOTICE.md',
+    'RESPONSIBILITIES.md',
+    'CHANGE_CONTROL.md',
+    'SECURITY.md',
+    'NOTICE.md',
+    'LICENSE',
+    '.github/pull_request_template.md',
+  ];
+  for (const file of required) assert.equal(existsSync(resolve(root, file)), true, file);
+
+  const readme = read('README.md');
+  for (const link of required.slice(0, 5)) assert.match(readme, new RegExp(`\\(${link.replace('.', '\\.') }\\)`));
+  assert.match(readme, /使用前必读/);
+  assert.match(readme, /独立开源软件/);
+});
+
+test('legal and responsibility documents define role boundaries and secret handling', () => {
+  const legal = read('LEGAL_NOTICE.md');
+  const responsibilities = read('RESPONSIBILITIES.md');
+  const changeControl = read('CHANGE_CONTROL.md');
+  const security = read('SECURITY.md');
+  assert.match(legal, /不授予任何第三方服务/);
+  assert.match(legal, /不使用本项目绕过封禁/);
+  assert.match(responsibilities, /部署运营方/);
+  assert.match(responsibilities, /上游服务方/);
+  assert.match(changeControl, /回滚/);
+  assert.match(security, /不要在公开 Issue/);
+  assert.match(read('.github/pull_request_template.md'), /变更负责人|上线批准人/);
+});

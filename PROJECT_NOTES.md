@@ -42,7 +42,7 @@
 - `import-credentials.js`：一次性读取旧 `freebuff_credentials.json`，导入后只保留加密 SQLite。
 - `docker-entrypoint.sh`：默认使用镜像内固定 `worker.js`；`WORKER_UPDATE_MODE=latest` 时要求 URL 和 SHA-256 校验。
 - `tests/`：代理、存储、鉴权、管理端、导入器和 Worker 并发/流取消回归测试。
-- `README.md`：用户部署、模型、代理和调用说明；`UPSTREAM_SYNC.md`：升级、备份、回滚流程。
+- `README.md`：用户部署、模型、代理和调用说明；`UPSTREAM_SYNC.md`：升级、备份、回滚流程；`LEGAL_NOTICE.md`、`RESPONSIBILITIES.md`、`CHANGE_CONTROL.md`、`SECURITY.md`、`NOTICE.md`：法律边界、责任交接、变更审批、安全报告和第三方归属。
 
 ## 3. API 路由
 

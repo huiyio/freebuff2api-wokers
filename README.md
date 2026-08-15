@@ -7,6 +7,8 @@
 
 把 **freebuff/codebuff** 的免费模型暴露成 **OpenAI-compatible API**。单文件无依赖，**推荐 Docker 容器部署**（或自建 VPS 运行），适配任意 OpenAI SDK / 客户端（QwenPaw、Hermes、ChatGPT-Next-Web、LobeChat、one-api 等）。
 
+> ⚖️ **使用前必读**：本项目是独立开源软件，不代表或受 Freebuff/Codebuff、Cloudflare、OpenAI、Anthropic、Docker 或 GitHub 授权。使用者必须拥有账号、Token、代理和请求数据的合法授权，并自行遵守上游条款、隐私义务和所在地法律。请先阅读 [使用与责任声明](LEGAL_NOTICE.md)、[责任划分](RESPONSIBILITIES.md)、[变更与回滚流程](CHANGE_CONTROL.md)、[安全策略](SECURITY.md) 和 [第三方归属](NOTICE.md)。
+
 > ⚠️ **部署方式重要提示**：Freebuff 官方已检测 Cloudflare Worker 部署（识别 `cf-worker` / `cf-ray` 等边缘标记），**在 CF 上部署会显著增加账号被封禁的风险**。因此本项目**不推荐 Cloudflare 部署**，推荐使用 **Docker 容器**或自建 VPS 运行（见下方「[🐳 Docker 容器化部署](#-docker-容器化部署-推荐)」）。
 
 ## ✨ 特性
@@ -642,15 +644,14 @@ Worker 已自动处理以上全部生命周期，无需手动干预。另：syst
 
 ## ⚠️ 免责声明
 
-本项目仅供**技术交流与学习研究**使用。
+本项目仅按 [AGPL-3.0](LICENSE) 授权代码，不保证任何第三方服务的账号资格、模型、额度、响应、可用性或持续兼容。上游条款可能限制逆向、自动化、代理、共享访问或特定地区的使用；使用者必须在部署前自行核对当前条款并取得必要授权，不得使用本项目绕过封禁、风控、速率限制、地域限制或付费限制。
 
-- 本项目通过逆向 freebuff 桌面版/API 协议实现代理，**违反 freebuff 官方服务条款（ToS）**。
-- 使用本项目存在**账号被封禁（banned）的风险**，且封禁为终态、不可恢复，请知悉并自行承担后果。
-- 请勿用于商业用途或大规模滥用，请尊重 freebuff 服务提供方的运营。
-- 使用者需自行遵守所在地法律法规及 freebuff 官方条款，本项目作者不对任何账号损失或纠纷负责。
+请求可能包含提示词、代码、文件、个人信息和上游回复。部署运营方负责数据流向、隐私告知、日志保留、秘密保管、备份、访问控制、事件通知以及向第三方提供服务时的合同和退款规则。维护者不控制上游服务，也不对部署者的账号损失、数据处理或第三方服务中断作额外保证。
+
+具体责任角色、交接证据和变更审批见 [RESPONSIBILITIES.md](RESPONSIBILITIES.md) 与 [CHANGE_CONTROL.md](CHANGE_CONTROL.md)。这类项目说明不替代适用法域的法律审阅或双方签署的书面合同。
 
 ## 📄 License
 
-本项目采用 [AGPL-3.0 License](LICENSE)。本项目参考并改写了 [freebuff2api](https://github.com/XxxXTeam/freebuff2api) 的部分代码与结构（原项目为 AGPL-3.0），因此本项目同样以 AGPL-3.0 开源；使用时请保留原版权声明，欢迎自由使用、修改与分享。
+本项目采用 [AGPL-3.0 License](LICENSE)。许可证只覆盖本仓库代码的复制、修改和再分发，不授予任何上游服务、账号、数据、模型或商标的使用许可。再分发时请同时阅读 [NOTICE.md](NOTICE.md)，保留适用的版权和许可证通知，并履行 AGPL-3.0 的对应源代码义务。
 
 
