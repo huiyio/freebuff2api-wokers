@@ -38,3 +38,24 @@ test('legal and responsibility documents define role boundaries and secret handl
   assert.match(security, /不要在公开 Issue/);
   assert.match(read('.github/pull_request_template.md'), /变更负责人|上线批准人/);
 });
+
+test('Docker documentation and GHCR publishing contract stay aligned', () => {
+  const readme = read('README.md');
+  const dockerGuide = read('DOCKER.md');
+  const compose = read('docker-compose.yml');
+  const workflow = read('.github/workflows/docker-publish.yml');
+
+  assert.match(readme, /\(DOCKER\.md\)/);
+  assert.match(dockerGuide, /ghcr\.io\/huiyio\/freebuff2api-wokers/);
+  assert.match(dockerGuide, /docker compose pull freebuff2api/);
+  assert.match(dockerGuide, /docker compose up -d --no-build/);
+  assert.match(dockerGuide, /ACCOUNT_STORE_KEY/);
+  assert.match(dockerGuide, /Package settings/);
+
+  assert.match(compose, /ghcr\.io\/huiyio\/freebuff2api-wokers:1\.8\.9-admin\.1/);
+  assert.match(workflow, /packages: write/);
+  assert.match(workflow, /secrets\.GITHUB_TOKEN/);
+  assert.match(workflow, /linux\/amd64,linux\/arm64/);
+  assert.match(workflow, /sbom: true/);
+  assert.doesNotMatch(workflow, /DOCKERHUB_/);
+});

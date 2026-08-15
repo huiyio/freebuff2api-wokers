@@ -3,7 +3,9 @@ version: "3.8"
 services:
   freebuff2api:
     build: .
-    image: ${FREEBUFF_IMAGE:-freebuff2api:1.8.9-admin.1}
+    # 预构建路径：先 docker compose pull，再 docker compose up -d --no-build。
+    # 本地源码构建仍可使用 docker compose up -d --build。
+    image: ${FREEBUFF_IMAGE:-ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1}
     container_name: freebuff2api
     restart: unless-stopped
     ports:

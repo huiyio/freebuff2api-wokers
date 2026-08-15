@@ -42,21 +42,31 @@ git diff --check
 
 遇到冲突时优先保留上游 `worker.js` 的业务变化，再逐项重放本分支少量安全补丁。不要为了完成合并直接接受整份旧 `worker.js`。测试未全部通过时不要构建生产镜像。
 
-## 2. 构建不可变镜像
+## 2. 发布不可变 GHCR 镜像
 
-标签应同时包含上游版本和管理层修订号。禁止覆盖旧标签或使用 `latest`：
+标签应同时包含上游版本和管理层修订号。首选推送 `v*` Git tag，由 `.github/workflows/docker-publish.yml` 在 GitHub Linux runner 上完成测试和 amd64/arm64 构建：
 
 ```bash
 set -eu
-new_image="freebuff2api:1.9.0-admin.1"
-docker image inspect "${new_image}" >/dev/null 2>&1 && {
-  echo "image tag already exists: ${new_image}" >&2
+release_tag="v1.9.0-admin.1"
+git rev-parse "refs/tags/${release_tag}" >/dev/null 2>&1 && {
+  echo "Git tag already exists: ${release_tag}" >&2
   exit 1
 }
-docker build --pull -t "${new_image}" .
+git tag -a "${release_tag}" -m "Release ${release_tag}"
+git push fork "refs/tags/${release_tag}"
 ```
 
-如果 `docker image inspect` 返回镜像不存在，命令会继续构建；若标签已存在，则退出，避免破坏回滚点。
+工作流进入默认分支后，也可在 Actions 的 `Build and publish Docker image` 页面手动填写尚未使用的不可变标签。工作流拒绝 `latest` 和已经存在的主标签。Actions 成功后记录构建摘要中的 digest，并在部署机验证拉取：
+
+```bash
+set -eu
+new_image="ghcr.io/huiyio/freebuff2api-wokers:1.9.0-admin.1"
+docker pull "${new_image}"
+docker image inspect "${new_image}" >/dev/null
+```
+
+需要本地审计时可以另建本地标签，但不能用它冒充同名 GHCR 发布物。完整发布、权限和 digest 固定方法见 `DOCKER.md`。
 
 ## 3. 停服备份并升级
 
@@ -64,7 +74,7 @@ docker build --pull -t "${new_image}" .
 
 ```bash
 set -eu
-new_image="freebuff2api:1.9.0-admin.1"
+new_image="ghcr.io/huiyio/freebuff2api-wokers:1.9.0-admin.1"
 rollback_ref="$(git describe --tags --match 'pre-upstream-*' --abbrev=0)"
 test -n "${rollback_ref}"
 old_image="$(docker inspect --format '{{.Config.Image}}' freebuff2api)"

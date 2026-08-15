@@ -42,7 +42,7 @@
 - `import-credentials.js`：一次性读取旧 `freebuff_credentials.json`，导入后只保留加密 SQLite。
 - `docker-entrypoint.sh`：默认使用镜像内固定 `worker.js`；`WORKER_UPDATE_MODE=latest` 时要求 URL 和 SHA-256 校验。
 - `tests/`：代理、存储、鉴权、管理端、导入器和 Worker 并发/流取消回归测试。
-- `README.md`：用户部署、模型、代理和调用说明；`UPSTREAM_SYNC.md`：升级、备份、回滚流程；`LEGAL_NOTICE.md`、`RESPONSIBILITIES.md`、`CHANGE_CONTROL.md`、`SECURITY.md`、`NOTICE.md`：法律边界、责任交接、变更审批、安全报告和第三方归属。
+- `README.md`：项目入口、模型、调用和部署摘要；`DOCKER.md`：GHCR 镜像、Compose、`docker run`、导入、HTTPS 和发布主文档；`UPSTREAM_SYNC.md`：升级、备份、回滚流程；`LEGAL_NOTICE.md`、`RESPONSIBILITIES.md`、`CHANGE_CONTROL.md`、`SECURITY.md`、`NOTICE.md`：法律边界、责任交接、变更审批、安全报告和第三方归属。
 
 ## 3. API 路由
 
@@ -97,13 +97,13 @@ Node 管理侧：
 ### 推荐：Docker Compose
 
 1. 生成首次使用的 `FREEBUFF_API_KEY`、`ACCOUNT_STORE_KEY`、`ADMIN_USERNAME` 和初始 `ADMIN_PASSWORD`，写入权限为 600 的 `.env`；后续 API Key 可在管理端轮换，旧值立即失效。
-2. 可选地运行 `docker compose run --rm --no-deps ... npm run import:credentials`，把旧 JSON 一次性导入加密 SQLite。
-3. `docker compose config --quiet && docker compose up -d --build`。
-4. 通过 SSH 隧道或 HTTPS 反向代理访问 `/admin/`；确认 HTTPS 后再启用 `ADMIN_COOKIE_SECURE=true` 和 `ADMIN_TRUST_PROXY=true`。
+2. 从 `ghcr.io/huiyio/freebuff2api-wokers` 拉取固定版本或 `sha-*` 镜像；可选地运行一次性旧 JSON 导入。
+3. `docker compose config --quiet && docker compose pull freebuff2api && docker compose up -d --no-build freebuff2api`。
+4. 通过 SSH 隧道或 HTTPS 反向代理访问 `/admin/`；确认 HTTPS 后再启用 `ADMIN_COOKIE_SECURE=true` 和 `ADMIN_TRUST_PROXY=true`。完整命令见 `DOCKER.md`。
 
 ### 等价：Docker run
 
-构建镜像、创建 `freebuff_data` volume；导入命令临时只读挂载旧 JSON，日常容器只挂载 `/app/data`。不要使用可变 `latest` 标签覆盖回滚点。
+直接拉取同一 GHCR 不可变镜像并创建 `freebuff_data` volume；导入命令临时只读挂载旧 JSON，日常容器只挂载 `/app/data`。不要把分支便利标签当作回滚点。
 
 ### 兼容：Cloudflare Worker
 
@@ -120,18 +120,18 @@ Node 管理侧：
 截至 2026-08-15：
 
 - `npm.cmd run check`：通过。
-- `npm.cmd test`：47/47 通过，包含管理员账号初始化/旧库补齐/重启持久化、API Key 轮换、每账号代理和并发 session 创建串行化回归。
+- `npm.cmd test`：50/50 通过，包含管理员账号初始化/旧库补齐/重启持久化、API Key 轮换、每账号代理、并发 session 创建串行化，以及 Docker/GHCR 文档契约回归。
 - `npm.cmd audit --omit=dev`：0 vulnerabilities。
 - `npm.cmd ci --ignore-scripts --omit=dev --dry-run`：通过。
 - `git diff --check`：通过；仅有 Windows 行尾转换提示。
 - Wrangler `4.123.0` dry-run：通过，约 87.7 KiB，gzip 约 20.2 KiB，无 bindings。
 - 已完成真实管理端登录、账号列表和预览 UI 检查，预览使用合成账号；没有读取或发送真实 Token。
-- 本机没有 Docker/Compose，因此未实际 build 镜像、启动 Compose 或执行真实代理连通性测试。
+- 本机没有 Docker/Compose，因此本地未 build 或启动镜像；多架构镜像由 GitHub Actions 在 Linux runner 上构建，运行结果和 digest 应以 Actions/GHCR 记录为准。
 - 没有使用真实 Freebuff 凭据做 session/chat 端到端测试；上游 `banned` 行为和额度仍未验证。
 
 ## 9. 后续操作顺序
 
-1. 在有 Docker 的目标机执行 `docker build --pull`、一次性导入和 Compose 启动，验证卷权限、管理员登录和代理测试。
+1. 在有 Docker 的目标机拉取已发布 GHCR 镜像，执行一次性导入和 Compose 启动，验证卷权限、管理员登录和代理测试。
 2. 用一个专用、获授权的测试账号做一次真实 `/v1/models`、流式 chat 和非流式 chat；记录脱敏状态码，不把 Token 放入日志。
 3. 每次发布前检查 `git status --short`、`git diff --check`、敏感文件和 `package-lock.json`；给可部署提交打本地回退标签。
 4. 生产升级遵循 `UPSTREAM_SYNC.md`：先备份 SQLite 和 `ACCOUNT_STORE_KEY`，使用不可变镜像标签，保留旧镜像和回滚 Git 标签。
