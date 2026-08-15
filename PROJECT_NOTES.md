@@ -127,6 +127,9 @@ Node 管理侧：
 - Wrangler `4.123.0` dry-run：通过，约 87.7 KiB，gzip 约 20.2 KiB，无 bindings。
 - 已完成真实管理端登录、账号列表和预览 UI 检查，预览使用合成账号；没有读取或发送真实 Token。
 - 本机没有 Docker/Compose，因此本地未 build 或启动镜像；多架构镜像由 GitHub Actions 在 Linux runner 上构建，运行结果和 digest 应以 Actions/GHCR 记录为准。
+- GitHub Actions 版本构建 [Run 31893248200](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31893248200) 成功：`ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1`，digest `sha256:6f36e3502497637ac8120cdf98ccbfca25169effb58798a6fcacd82449a1241c`，包含 amd64/arm64、SBOM 和 provenance。
+- GitHub Actions 分支构建 [Run 31893248217](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31893248217) 成功：`sha-7043f800c93f`，digest `sha256:63083a709a37bfb01600fe7c90989ccc6b90c5cfa91929673442fb3c767d188d`；分支便利标签同步发布。
+- GHCR Package 当前为 private，未登录的 registry manifest 请求返回 `401`。部署机可先用 `read:packages` PAT 登录；如需匿名拉取，仓库所有者必须在 Package settings 人工确认不可逆的 Public 切换。
 - 没有使用真实 Freebuff 凭据做 session/chat 端到端测试；上游 `banned` 行为和额度仍未验证。
 
 ## 9. 后续操作顺序
@@ -141,5 +144,6 @@ Node 管理侧：
 
 - 功能分支尚未合并到 `main`，本次改造也未生产部署。
 - 未在本机实际构建 Docker 镜像（环境缺少 Docker CLI）。
+- GHCR Package 尚未改为 Public；匿名 `docker pull` 前仍需一次人工确认，或继续使用 `docker login ghcr.io`。
 - 未实现跨 Cloudflare isolate 的全局账号协调；当前 Worker 仍是 isolate-local 状态。
 - 未承诺任何模型的固定额度或绕过封禁能力。

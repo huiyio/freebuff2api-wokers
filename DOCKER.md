@@ -20,16 +20,23 @@
 
 仓库不发布 `latest`。生产应固定版本标签、`sha-*` 标签，或进一步固定 Actions 输出的镜像 digest。
 
-公开 GHCR 包可匿名拉取：
-
-```bash
-docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1
-```
-
-如果包暂时是 private，需要先用仅有 `read:packages` 权限的 GitHub PAT 登录，或由仓库所有者在 GitHub Packages 设置中改为 Public：
+截至 2026-08-15，`1.8.9-admin.1` 已由 GitHub Actions 成功发布；该 Package 当前为 private，部署机需要先用仅有 `read:packages` 权限的 GitHub PAT 登录：
 
 ```bash
 printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-stdin
+docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1
+```
+
+镜像 digest：
+
+```text
+sha256:6f36e3502497637ac8120cdf98ccbfca25169effb58798a6fcacd82449a1241c
+```
+
+仓库所有者可在 GitHub Package settings 的 Danger Zone 把包改为 Public；该操作不可恢复为 private，必须确认后人工执行。改成 Public 后可以匿名拉取：
+
+```bash
+docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1
 ```
 
 不要把 PAT 写进 `.env`、Compose、Issue 或命令示例。
@@ -270,7 +277,7 @@ docker compose up -d --build freebuff2api
 
 发布前工作流执行 `npm ci`、语法检查和完整测试，再构建 amd64/arm64 镜像、SBOM 和 provenance。主标签已存在时工作流拒绝覆盖；`latest` 始终被拒绝。
 
-仓库 Settings -> Actions -> General 中应允许工作流获得读写权限；工作流文件也显式声明了 `packages: write`。首次发布后，在 Package settings 中确认包已连接到本仓库，并按需要设为 Public，才能匿名 `docker pull`。
+仓库 Settings -> Actions -> General 中应允许 Actions；工作流文件显式声明了最小的 `contents: read` 和 `packages: write` 权限。首次发布后，在 Package settings 中确认包已连接到本仓库。个人账号的 Package 默认是 private；改为 Public 后可匿名 `docker pull`，而且不能再改回 private。
 
 ## 10. 安全与责任边界
 

@@ -16,14 +16,14 @@ on:
         type: string
 
 concurrency:
-  group: docker-publish-${{ github.ref }}-${{ inputs.image_tag || github.sha }}
+  # Serialize all registry writes so the mutable branch alias cannot move
+  # backwards and two runs cannot race the immutable-tag preflight check.
+  group: docker-publish-ghcr
   cancel-in-progress: false
 
 permissions:
   contents: read
   packages: write
-  attestations: write
-  id-token: write
 
 env:
   NODE_VERSION: "24"
@@ -126,6 +126,7 @@ jobs:
           fi
 
       - name: Build and push linux/amd64 and linux/arm64
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -147,15 +148,19 @@ jobs:
         env:
           REPOSITORY: ${{ steps.image.outputs.repository }}
           PRIMARY_TAG: ${{ steps.image.outputs.primary_tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          digest="$(docker buildx imagetools inspect "$REPOSITORY:$PRIMARY_TAG" --format '{{.Manifest.Digest}}')"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "build action returned an invalid image digest: $DIGEST" >&2
+            exit 1
+          fi
           echo "Primary image: $REPOSITORY:$PRIMARY_TAG"
-          echo "Digest: $digest"
+          echo "Digest: $DIGEST"
           {
             echo "### Published image"
             echo ''
             echo '```text'
-            echo "$REPOSITORY:$PRIMARY_TAG@$digest"
+            echo "$REPOSITORY:$PRIMARY_TAG@$DIGEST"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

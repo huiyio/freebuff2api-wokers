@@ -144,6 +144,8 @@ ghcr.io/huiyio/freebuff2api-wokers
 
 当前 Compose 默认固定不可变版本 `1.8.9-admin.1`，支持 `linux/amd64` 和 `linux/arm64`。仓库不发布 `latest`；升级和回滚应使用版本标签、`sha-<提交前12位>` 标签或镜像 digest。可变的 `branch-codex-per-account-proxy` 只用于临时试用。
 
+截至 2026-08-15，该 GHCR Package 为 private。首次在部署机使用时先执行 `docker login ghcr.io`（PAT 只授予 `read:packages`）；如果仓库所有者以后在 Package settings 人工确认改为 Public，则可以跳过登录。Public 切换不可恢复为 private。
+
 #### 直接使用 GitHub 构建镜像
 
 1. 按 [`DOCKER.md`](DOCKER.md#21-创建首次初始化密钥) 生成权限受限的 `.env`。必须分别设置随机的 `FREEBUFF_API_KEY`、`ACCOUNT_STORE_KEY`、`ADMIN_PASSWORD`，并保留空的 `FREEBUFF_TOKEN` / `FREEBUFF_PROXY_URL`。
