@@ -85,9 +85,9 @@ curl https://你的worker.workers.dev/healthz
 - `version` 是 `worker.js` 的协议版本，不足以证明 Node 管理层已升级；非 Docker 部署还应核对 `current` symlink，登录管理端后查看 `/admin/api/system` 的 `appVersion`
 - 适合接入 UptimeRobot / 自建监控探活
 
-## 🔑 获取 FREEBUFF_TOKEN
+## 🔑 添加账号（Web 授权优先）
 
-freebuff 登录凭证（authToken）通过官方 CLI 同款**授权码轮询**获取。项目自带提取工具 `freebuff_tools/extract_freebuff.py`，交互方式与 `cline_oauth.py` 一致。
+管理模式下无需手工获取或复制 `FREEBUFF_TOKEN`：登录管理端完成一次 Web 授权即可自动添加账号。`freebuff_tools/extract_freebuff.py` 仅供 Cloudflare Worker、兼容部署或故障排查时手工提取 Token。
 
 ### 管理端 Web 授权（管理模式优先）
 
@@ -334,7 +334,7 @@ curl -N https://你的worker.workers.dev/v1/chat/completions \
 
 ## 👥 多账号
 
-`FREEBUFF_TOKEN` 用英文逗号分隔多个 token（`token1,token2`）。撞额度（429/空响应）时自动冷却当前账号并切下一个。
+管理模式（`ADMIN_ENABLED=true`）下，每添加一个账号就在“账号”页重复点击“授权账号”，无需复制 Token。Cloudflare Worker 或兼容环境才使用 `FREEBUFF_TOKEN` 英文逗号分隔多个 Token（`token1,token2`）。撞额度（429/空响应）时自动冷却当前账号并切下一个。
 
 **账号选择策略**（v1.4.0 起）：
 
