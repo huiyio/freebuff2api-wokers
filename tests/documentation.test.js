@@ -51,6 +51,8 @@ test('Docker documentation and GHCR publishing contract stay aligned', () => {
   assert.match(dockerGuide, /docker compose up -d --no-build/);
   assert.match(dockerGuide, /ACCOUNT_STORE_KEY/);
   assert.match(dockerGuide, /Package settings/);
+  assert.match(dockerGuide, /授权账号/);
+  assert.match(readme, /管理端 Web 授权/);
 
   assert.match(compose, /ghcr\.io\/huiyio\/freebuff2api-wokers:1\.8\.9-admin\.1/);
   assert.match(workflow, /packages: write/);

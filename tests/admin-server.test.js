@@ -129,6 +129,35 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
   const runtime = new AccountRuntime({ store, requireProxy: true, retireMs: 0 });
   runtime.initialize();
   const service = new AccountService({ store, runtime, requireProxy: true });
+  const authorizationCalls = [];
+  const authorizer = {
+    async start(session) {
+      authorizationCalls.push({ action: 'start', session });
+      return {
+        authorization: {
+          id: 'authorization-1',
+          status: 'pending',
+          createdAt: '2026-08-16T00:00:00.000Z',
+          loginUrl: 'https://www.codebuff.com/login?auth_code=one-time-code',
+        },
+      };
+    },
+    async poll(id, session) {
+      authorizationCalls.push({ action: 'poll', id, session });
+      return {
+        authorization: {
+          id,
+          status: 'completed',
+          createdAt: '2026-08-16T00:00:00.000Z',
+          account: { id: 'authorized-account', name: 'authorized@example.com', enabled: false },
+        },
+      };
+    },
+    cancel(id, session) {
+      authorizationCalls.push({ action: 'cancel', id, session });
+      return { authorization: { id, status: 'cancelled', createdAt: '2026-08-16T00:00:00.000Z' } };
+    },
+  };
   const auth = await initializeAdminAuth({
     store,
     initialPassword: 'integration-admin-password',
@@ -143,6 +172,7 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     uiDirectory,
     getAccountHealth: async () => [{ account: 1, alive: true, state: 'active' }],
     getSystemInfo: async () => ({ appVersion: 'test-version', requireProxy: true }),
+    authorizer,
   });
 
   try {
@@ -153,6 +183,9 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     assert.match(pageText, /Freebuff Control/);
     assert.match(pageText, /login-username/);
     assert.match(pageText, /api-key-confirm-dialog/);
+    assert.match(pageText, /account-authorization-dialog/);
+    assert.match(pageText, /authorize-account-button/);
+    assert.match(pageText, /rel="noopener noreferrer"/);
     assert.match(pageText, /integration-docs/);
     assert.match(pageText, /integration-base-url/);
     assert.match(pageText, /\/v1\/chat\/completions/);
@@ -167,6 +200,7 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     assert.match(appText, /mimo\/mimo-v2\.5/);
     assert.match(appText, /Authorization: Bearer YOUR_API_KEY/);
     assert.match(appText, /from anthropic import Anthropic/);
+    assert.match(appText, /account-authorizations/);
 
     const stylesAsset = await handler(new Request('http://local/admin/styles.css'));
     assert.equal(stylesAsset.status, 200);
@@ -202,6 +236,34 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     }));
     assert.equal(noCsrf.status, 403);
     assert.equal((await noCsrf.json()).error.type, 'ADMIN_CSRF_INVALID');
+
+    const startedAuthorization = await handler(new Request('http://local/admin/api/account-authorizations', {
+      method: 'POST',
+      headers: mutationHeaders,
+      body: '{}',
+    }));
+    assert.equal(startedAuthorization.status, 201);
+    assert.equal((await startedAuthorization.json()).authorization.loginUrl, 'https://www.codebuff.com/login?auth_code=one-time-code');
+    assert.equal(authorizationCalls[0].action, 'start');
+    assert.equal(authorizationCalls[0].session.username, 'admin');
+
+    const polledAuthorization = await handler(new Request('http://local/admin/api/account-authorizations/authorization-1', {
+      method: 'POST',
+      headers: mutationHeaders,
+      body: '{}',
+    }));
+    assert.equal(polledAuthorization.status, 200);
+    assert.equal((await polledAuthorization.json()).authorization.status, 'completed');
+    assert.equal(authorizationCalls[1].action, 'poll');
+
+    const cancelledAuthorization = await handler(new Request('http://local/admin/api/account-authorizations/authorization-1', {
+      method: 'DELETE',
+      headers: mutationHeaders,
+      body: '{}',
+    }));
+    assert.equal(cancelledAuthorization.status, 200);
+    assert.equal((await cancelledAuthorization.json()).authorization.status, 'cancelled');
+    assert.equal(authorizationCalls[2].action, 'cancel');
 
     const created = await handler(new Request('http://local/admin/api/accounts', {
       method: 'POST',

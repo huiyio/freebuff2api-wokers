@@ -1,6 +1,6 @@
 # freebuff2api-workers 当前项目基线
 
-更新日期：2026-08-15（Asia/Shanghai）
+更新日期：2026-08-16（Asia/Tokyo）
 项目位置：仓库根目录
 当前分支：`codex/per-account-proxy`
 上游远端：`https://github.com/pingmike2/freebuff2api-wokers.git`
@@ -38,6 +38,7 @@
 - `account-store.js`：SQLite schema、账号/审计/设置持久化。
 - `credential-vault.js`：AES-256-GCM 加密 Token/完整代理 URL 和主密钥校验。
 - `admin-auth.js`：scrypt 管理员密码、会话 Cookie、登录限流。
+- `freebuff-authorizer.js`：服务端 Codebuff 授权码流程；使用独立 `undici.fetch`，避免被账号代理的全局 fetch 路由劫持。
 - `admin-server.js`、`admin-ui/`：管理 API 和 Web 管理端。
 - `import-credentials.js`：一次性读取旧 `freebuff_credentials.json`，导入后只保留加密 SQLite。
 - `docker-entrypoint.sh`：默认使用镜像内固定 `worker.js`；`WORKER_UPDATE_MODE=latest` 时要求 URL 和 SHA-256 校验。
@@ -67,6 +68,7 @@ Node 管理侧：
 ### 管理模式（默认 Docker Compose）
 
 - `ADMIN_ENABLED=true` 时，`FREEBUFF_TOKEN` 和 `FREEBUFF_PROXY_URL` 必须为空；账号只能来自首次旧凭据导入或 Web 管理端。
+- 管理端“授权账号”使用一次性授权链接和服务器端轮询，Token 只从上游响应直接写入加密 SQLite，绝不返回浏览器、审计日志或 URL。授权请求绑定当前管理员会话，短期内存记录会在完成、取消或超时后清除。
 - Token 和完整代理 URL 使用 AES-256-GCM 加密存入 SQLite；API 响应只返回掩码值。
 - 管理员账号写入 `settings.admin_username`，首次由 `ADMIN_USERNAME` 初始化（默认 `admin`），后续环境变量不会覆盖数据库值；密码使用 scrypt 哈希。Cookie 为 HttpOnly/SameSite=Strict，可在 HTTPS 反代后启用 Secure。
 - `REQUIRE_ACCOUNT_PROXY=true` 时，启用账号必须有 `http://`、`https://`、`socks5://` 或 `socks5h://` 代理；代理失败严格报错，不回退直连。
@@ -120,7 +122,7 @@ Node 管理侧：
 截至 2026-08-15：
 
 - `npm.cmd run check`：通过。
-- `npm.cmd test`：50/50 通过，包含管理员账号初始化/旧库补齐/重启持久化、API Key 轮换、每账号代理、并发 session 创建串行化，以及 Docker/GHCR 文档契约回归。
+- `npm.cmd test`：55/55 通过，包含管理员账号初始化/旧库补齐/重启持久化、API Key 轮换、Web 授权会话隔离与脱敏、每账号代理、并发 session 创建串行化，以及 Docker/GHCR 文档契约回归。
 - `npm.cmd audit --omit=dev`：0 vulnerabilities。
 - `npm.cmd ci --ignore-scripts --omit=dev --dry-run`：通过。
 - `git diff --check`：通过；仅有 Windows 行尾转换提示。

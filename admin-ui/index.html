@@ -52,7 +52,10 @@
             <h2>账号</h2>
             <p id="accounts-updated" class="muted"></p>
           </div>
-          <button id="add-account-button" class="primary" type="button">添加账号</button>
+          <div class="page-actions">
+            <button id="authorize-account-button" class="primary" type="button">授权账号</button>
+            <button id="add-account-button" class="secondary" type="button">手动添加</button>
+          </div>
         </header>
 
         <div class="summary-strip" aria-label="账号摘要">
@@ -296,6 +299,28 @@
         <button id="save-account-button" class="primary" type="submit">保存</button>
       </footer>
     </form>
+  </dialog>
+
+  <dialog id="account-authorization-dialog" class="modal compact">
+    <section class="authorization-dialog-content">
+      <header class="modal-header">
+        <h3>授权 Freebuff 账号</h3>
+        <button id="authorization-close-button" class="icon-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <div id="authorization-start-state" class="authorization-state">
+        <p class="confirm-text">完成登录授权后，账号会自动保存到本服务。严格代理模式下，新账号会先保持停用，配置代理后再启用。</p>
+        <button id="authorization-start-button" class="primary full-width" type="button">生成授权链接</button>
+      </div>
+      <div id="authorization-progress-state" class="authorization-state hidden" aria-live="polite">
+        <p class="confirm-text">在新标签页完成 Codebuff 登录和授权，本页面会自动保存账号。</p>
+        <a id="authorization-link" class="primary authorization-link" target="_blank" rel="noopener noreferrer">打开授权页</a>
+        <p id="authorization-status" class="authorization-status">等待授权</p>
+      </div>
+      <p id="authorization-error" class="form-error" role="alert"></p>
+      <footer class="modal-footer">
+        <button id="authorization-cancel-button" class="secondary" type="button">取消</button>
+      </footer>
+    </section>
   </dialog>
 
   <dialog id="delete-dialog" class="modal compact">

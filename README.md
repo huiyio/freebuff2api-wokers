@@ -61,7 +61,7 @@ Worker 通过 Cloudflare Workers 访问 Freebuff，上游通常会将请求识�
 
 ## 🚀 快速开始
 
-1. 兼容模式先获取 freebuff token（见下方「获取 FREEBUFF_TOKEN」）；Docker Web 管理模式可跳过，稍后从管理端添加账号
+1. 兼容模式先获取 freebuff token（见下方「获取 FREEBUFF_TOKEN」）；Web 管理模式可直接在管理端完成账号授权，无需复制 Token
 2. 部署服务（见下方「部署」，**推荐 Docker 容器部署**）
 3. 配置环境变量：
    - 兼容模式（`ADMIN_ENABLED=false`）设置 `FREEBUFF_TOKEN`；Web 管理模式通过首次导入或管理端添加账号
@@ -88,6 +88,12 @@ curl https://你的worker.workers.dev/healthz
 ## 🔑 获取 FREEBUFF_TOKEN
 
 freebuff 登录凭证（authToken）通过官方 CLI 同款**授权码轮询**获取。项目自带提取工具 `freebuff_tools/extract_freebuff.py`，交互方式与 `cline_oauth.py` 一致。
+
+### 管理端 Web 授权（管理模式优先）
+
+`ADMIN_ENABLED=true` 时，登录管理端后在“账号”页点击“授权账号”。服务端会生成一次性 Codebuff 授权链接；在新标签页完成你自己的账号登录后，服务端自动轮询并把 Token 加密写入 SQLite，浏览器和审计日志不会收到 Token。
+
+严格代理模式下，授权完成的账号会先以**停用**状态保存。为该账号填写 HTTP/HTTPS/SOCKS5 代理并启用后，才会进入请求账号池。授权链接有效期很短，只能由当前管理员会话使用；请不要截图、转发或在明文 HTTP 管理端使用。公网管理端应先配置 HTTPS。
 
 ### 方式 A：GitHub Actions 工作流（推荐，远程提取）
 

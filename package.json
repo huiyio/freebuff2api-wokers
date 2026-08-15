@@ -7,8 +7,8 @@
   "scripts": {
     "start": "node server.js",
     "import:credentials": "node import-credentials.js",
-    "check": "node --check account-proxy.js && node --check account-manager.js && node --check account-store.js && node --check admin-auth.js && node --check admin-server.js && node --check credential-vault.js && node --check import-credentials.js && node --check server-utils.js && node --check server.js && node --check worker.js && node --check admin-ui/app.js",
-    "test": "node --test tests/account-proxy.test.js tests/server-utils.test.js tests/worker-hardening.test.js tests/account-store.test.js tests/admin-auth.test.js tests/account-manager.test.js tests/admin-server.test.js tests/import-credentials.test.js tests/documentation.test.js",
+    "check": "node --check account-proxy.js && node --check account-manager.js && node --check account-store.js && node --check admin-auth.js && node --check admin-server.js && node --check credential-vault.js && node --check freebuff-authorizer.js && node --check import-credentials.js && node --check server-utils.js && node --check server.js && node --check worker.js && node --check admin-ui/app.js",
+    "test": "node --test tests/account-proxy.test.js tests/server-utils.test.js tests/worker-hardening.test.js tests/account-store.test.js tests/admin-auth.test.js tests/account-manager.test.js tests/admin-server.test.js tests/freebuff-authorizer.test.js tests/import-credentials.test.js tests/documentation.test.js",
     "test:core": "node --test tests/account-proxy.test.js tests/server-utils.test.js tests/worker-hardening.test.js",
     "test:admin": "node --test tests/account-store.test.js tests/admin-auth.test.js tests/account-manager.test.js tests/admin-server.test.js tests/import-credentials.test.js"
   },

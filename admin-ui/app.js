@@ -11,6 +11,8 @@ const state = {
   editingId: null,
   deletingId: null,
   pollTimer: null,
+  authorization: null,
+  authorizationPollTimer: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -66,6 +68,11 @@ async function api(path, options = {}) {
 
 function showLogin() {
   clearInterval(state.pollTimer);
+  clearTimeout(state.authorizationPollTimer);
+  state.authorizationPollTimer = null;
+  state.authorization = null;
+  const authorizationDialog = $('#account-authorization-dialog');
+  if (authorizationDialog?.open) authorizationDialog.close();
   state.apiKey = {};
   state.username = '';
   $('#api-key-output').value = '';
@@ -477,6 +484,149 @@ function openAccountDialog(account = null) {
   $('#account-name').focus();
 }
 
+function clearAuthorizationPolling() {
+  clearTimeout(state.authorizationPollTimer);
+  state.authorizationPollTimer = null;
+}
+
+function authorizationMessage(authorization) {
+  if (!authorization) return '';
+  if (authorization.status === 'pending') {
+    return authorization.retrying
+      ? '授权服务暂时不可用，正在自动重试'
+      : '等待你在授权页完成登录';
+  }
+  if (authorization.status === 'completed') {
+    return '授权完成，账号已保存。请配置代理后再启用。';
+  }
+  return authorization.message || '授权未完成，请重新开始。';
+}
+
+function renderAuthorizationDialog() {
+  const authorization = state.authorization;
+  const started = Boolean(authorization);
+  const pending = authorization?.status === 'pending';
+  $('#authorization-start-state').classList.toggle('hidden', started);
+  $('#authorization-progress-state').classList.toggle('hidden', !started);
+  $('#authorization-error').textContent = '';
+  if (!started) {
+    $('#authorization-start-button').disabled = false;
+    $('#authorization-status').textContent = '';
+    $('#authorization-link').removeAttribute('href');
+    $('#authorization-link').classList.add('hidden');
+    $('#authorization-cancel-button').textContent = '取消';
+    return;
+  }
+  const link = $('#authorization-link');
+  if (pending && authorization.loginUrl) {
+    link.href = authorization.loginUrl;
+    link.classList.remove('hidden');
+  } else {
+    link.removeAttribute('href');
+    link.classList.add('hidden');
+  }
+  $('#authorization-status').textContent = authorizationMessage(authorization);
+  $('#authorization-cancel-button').textContent = pending ? '取消' : '关闭';
+}
+
+function openAuthorizationDialog() {
+  clearAuthorizationPolling();
+  state.authorization = null;
+  renderAuthorizationDialog();
+  $('#account-authorization-dialog').showModal();
+  $('#authorization-start-button').focus();
+}
+
+function scheduleAuthorizationPoll() {
+  clearAuthorizationPolling();
+  if (state.authorization?.status !== 'pending') return;
+  state.authorizationPollTimer = setTimeout(() => {
+    void pollAuthorization();
+  }, 5000);
+}
+
+async function startAuthorization() {
+  const button = $('#authorization-start-button');
+  button.disabled = true;
+  $('#authorization-error').textContent = '';
+  try {
+    const payload = await api('/account-authorizations', {
+      method: 'POST',
+      body: '{}',
+    });
+    state.authorization = payload.authorization || null;
+    if (!state.authorization?.id || !state.authorization?.loginUrl) {
+      throw new Error('授权服务返回了无效链接');
+    }
+    renderAuthorizationDialog();
+    scheduleAuthorizationPoll();
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    $('#authorization-error').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function pollAuthorization() {
+  const current = state.authorization;
+  if (!current?.id || current.status !== 'pending') return;
+  try {
+    const payload = await api(`/account-authorizations/${encodeURIComponent(current.id)}`, {
+      method: 'POST',
+      body: '{}',
+    });
+    const next = payload.authorization || null;
+    if (!next?.id) throw new Error('授权状态无效');
+    state.authorization = { ...current, ...next };
+    if (state.authorization.status !== 'pending') {
+      clearAuthorizationPolling();
+      if (state.authorization.status === 'completed') {
+        toast('账号授权完成，配置代理后即可启用');
+      } else if (state.authorization.status === 'duplicate') {
+        toast('该 Freebuff 账号已经存在', 'error');
+      } else if (state.authorization.status === 'failed') {
+        toast('账号授权完成，但保存失败，请重试', 'error');
+      }
+      await Promise.all([loadAccounts(), loadSystem()]);
+    }
+    renderAuthorizationDialog();
+    scheduleAuthorizationPoll();
+  } catch (error) {
+    if (error.status === 401) return showLogin();
+    if (error.status === 404 || error.status === 403) {
+      clearAuthorizationPolling();
+      state.authorization = {
+        ...current,
+        status: 'expired',
+        message: '授权状态已失效，请重新开始。',
+      };
+      renderAuthorizationDialog();
+      return;
+    }
+    $('#authorization-error').textContent = error.message || '无法更新授权状态';
+    scheduleAuthorizationPoll();
+  }
+}
+
+async function closeAuthorizationDialog() {
+  const authorization = state.authorization;
+  clearAuthorizationPolling();
+  if (authorization?.id && authorization.status === 'pending') {
+    try {
+      await api(`/account-authorizations/${encodeURIComponent(authorization.id)}`, {
+        method: 'DELETE',
+        body: '{}',
+      });
+    } catch (error) {
+      if (error.status === 401) showLogin();
+      toast(error.message || '无法取消授权', 'error');
+    }
+  }
+  state.authorization = null;
+  $('#account-authorization-dialog').close();
+}
+
 async function saveAccount(event) {
   event.preventDefault();
   const id = state.editingId;
@@ -620,6 +770,14 @@ $('#logout-button').addEventListener('click', async () => {
 $$('.nav-button').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
 $$('[data-close-dialog]').forEach((button) => button.addEventListener('click', () => $(`#${button.dataset.closeDialog}`).close()));
 $('#add-account-button').addEventListener('click', () => openAccountDialog());
+$('#authorize-account-button').addEventListener('click', openAuthorizationDialog);
+$('#authorization-start-button').addEventListener('click', startAuthorization);
+$('#authorization-cancel-button').addEventListener('click', () => { void closeAuthorizationDialog(); });
+$('#authorization-close-button').addEventListener('click', () => { void closeAuthorizationDialog(); });
+$('#account-authorization-dialog').addEventListener('cancel', (event) => {
+  event.preventDefault();
+  void closeAuthorizationDialog();
+});
 $('#account-form').addEventListener('submit', saveAccount);
 $('#delete-form').addEventListener('submit', deleteAccount);
 $('#password-form').addEventListener('submit', changePassword);

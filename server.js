@@ -22,6 +22,7 @@ import { AccountStore } from './account-store.js';
 import { initializeAdminAuth } from './admin-auth.js';
 import { createAdminHandler } from './admin-server.js';
 import { createCredentialVault } from './credential-vault.js';
+import { FreebuffAuthorizer } from './freebuff-authorizer.js';
 import {
   DEFAULT_MAX_REQUEST_BODY_BYTES,
   parsePositiveInteger,
@@ -114,6 +115,7 @@ const adminTrustProxy = parseEnvBoolean(
 let accountStore = null;
 let accountService = null;
 let adminAuth = null;
+let freebuffAuthorizer = null;
 
 if (adminEnabled) {
   const vault = createCredentialVault(secretValue('ACCOUNT_STORE_KEY'));
@@ -177,6 +179,7 @@ if (accountStore) {
     requireProxy: requireAccountProxy,
     connectTimeoutMs: accountProxyConnectTimeoutMs,
   });
+  freebuffAuthorizer = new FreebuffAuthorizer({ accountService });
 }
 
 // Install the stable, reloadable Node fetch router before importing the Worker.
@@ -283,6 +286,7 @@ if (adminEnabled) {
     getAccountHealth: async () => (await workerHealth()).account_details || [],
     getApiKeyInfo: apiKeyInfo,
     rotateApiKey,
+    authorizer: freebuffAuthorizer,
     getSystemInfo: async () => {
       const health = await workerHealth();
       const current = runtime.snapshot.stats;

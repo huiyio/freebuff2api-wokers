@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AdminAuthError } from './admin-auth.js';
 import { AccountServiceError } from './account-manager.js';
+import { FreebuffAuthorizationError } from './freebuff-authorizer.js';
 
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',
@@ -35,7 +36,9 @@ function withCookies(response, cookies) {
 
 function apiError(error) {
   const status = Number(error?.status) || 500;
-  const publicError = error instanceof AdminAuthError || error instanceof AccountServiceError;
+  const publicError = error instanceof AdminAuthError
+    || error instanceof AccountServiceError
+    || error instanceof FreebuffAuthorizationError;
   const headers = {};
   if (error?.retryAfter) headers['retry-after'] = String(error.retryAfter);
   return json({
@@ -85,6 +88,7 @@ export function createAdminHandler({
   getSystemInfo = () => ({}),
   getApiKeyInfo = () => ({ configured: false, masked: null, updatedAt: null }),
   rotateApiKey = () => { throw new AccountServiceError('API key management is unavailable', 503, 'ADMIN_API_KEY_UNAVAILABLE'); },
+  authorizer = null,
   onError = () => {},
 }) {
   const assets = staticAssets(uiDirectory);
@@ -157,6 +161,31 @@ export function createAdminHandler({
       if (path === '/admin/api/accounts' && request.method === 'POST') {
         const account = await accountService.create(await requestJson(request), session.actor);
         return json({ account }, 201);
+      }
+
+      if (path === '/admin/api/account-authorizations' && request.method === 'POST') {
+        if (!authorizer) {
+          throw new AccountServiceError('Freebuff web authorization is unavailable', 503, 'FREEBUFF_AUTH_UNAVAILABLE');
+        }
+        await requestJson(request);
+        return json(await authorizer.start(session), 201);
+      }
+
+      const authorizationMatch = /^\/admin\/api\/account-authorizations\/([^/]+)$/.exec(path);
+      if (authorizationMatch && request.method === 'POST') {
+        if (!authorizer) {
+          throw new AccountServiceError('Freebuff web authorization is unavailable', 503, 'FREEBUFF_AUTH_UNAVAILABLE');
+        }
+        await requestJson(request);
+        return json(await authorizer.poll(decodeURIComponent(authorizationMatch[1]), session));
+      }
+
+      if (authorizationMatch && request.method === 'DELETE') {
+        if (!authorizer) {
+          throw new AccountServiceError('Freebuff web authorization is unavailable', 503, 'FREEBUFF_AUTH_UNAVAILABLE');
+        }
+        await requestJson(request);
+        return json(authorizer.cancel(decodeURIComponent(authorizationMatch[1]), session));
       }
 
       const accountMatch = /^\/admin\/api\/accounts\/([^/]+)$/.exec(path);
