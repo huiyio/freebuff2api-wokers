@@ -1,4 +1,5 @@
 import {
+  AccountProxyConfigError,
   createAccountRoute,
   installReloadableAccountProxyFetch,
   normalizeTokenEntry,
@@ -259,6 +260,13 @@ export class AccountService {
 
   #translateError(error) {
     if (error instanceof AccountServiceError) return error;
+    if (error instanceof AccountProxyConfigError) {
+      return new AccountServiceError(
+        'account proxy configuration is invalid; edit the account and save the proxy again',
+        400,
+        'ACCOUNT_PROXY_INVALID',
+      );
+    }
     if (/UNIQUE constraint failed: accounts\.token_fingerprint/i.test(error?.message || '')) {
       return new AccountServiceError('this Freebuff token is already managed', 409, 'ACCOUNT_DUPLICATE');
     }
@@ -385,26 +393,34 @@ export class AccountService {
 
   testProxy(id, actor = 'admin', options = {}) {
     return this.#exclusive(async () => {
-      const account = this.get(id, { includeSecrets: true });
-      const route = accountRoute(account);
-      if (!route.proxy) {
-        throw new AccountServiceError('this account does not have a proxy to test');
-      }
-      const result = await probeAccountProxy(route, {
-        connectTimeoutMs: this.connectTimeoutMs,
-        ...options,
-      });
-      let updated;
-      this.store.transaction(() => {
-        updated = this.store.setProxyTest(id, result);
-        this.store.appendAudit({
-          actor,
-          action: result.ok ? 'proxy.test_succeeded' : 'proxy.test_failed',
-          accountId: id,
-          summary: result.ok ? `Proxy test succeeded for ${account.name}` : `Proxy test failed for ${account.name}`,
+      try {
+        const account = this.get(id, { includeSecrets: true });
+        if (!account.proxyUrl) {
+          throw new AccountServiceError(
+            'configure a proxy before testing this account',
+            400,
+            'ACCOUNT_PROXY_MISSING',
+          );
+        }
+        const route = accountRoute(account);
+        const result = await probeAccountProxy(route, {
+          connectTimeoutMs: this.connectTimeoutMs,
+          ...options,
         });
-      });
-      return { result, account: updated };
+        let updated;
+        this.store.transaction(() => {
+          updated = this.store.setProxyTest(id, result);
+          this.store.appendAudit({
+            actor,
+            action: result.ok ? 'proxy.test_succeeded' : 'proxy.test_failed',
+            accountId: id,
+            summary: result.ok ? `Proxy test succeeded for ${account.name}` : `Proxy test failed for ${account.name}`,
+          });
+        });
+        return { result, account: updated };
+      } catch (error) {
+        throw this.#translateError(error);
+      }
     });
   }
 }

@@ -287,7 +287,7 @@ function renderAccounts() {
       </td>
       <td data-label="操作">
         <div class="action-group">
-          <button class="table-action" type="button" data-action="test">测试</button>
+          <button class="table-action" type="button" data-action="test" ${account.hasProxy ? '' : 'disabled title="请先编辑账号并配置代理"'}>测试</button>
           <button class="table-action" type="button" data-action="toggle">${account.enabled ? '停用' : '启用'}</button>
           <button class="table-action" type="button" data-action="edit">编辑</button>
           <button class="table-action destructive" type="button" data-action="delete">删除</button>

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const read = (name) => readFileSync(resolve(root, name), 'utf8');
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 test('project responsibility and security documents are present and linked', () => {
   const required = [
@@ -45,6 +46,7 @@ test('Docker documentation and GHCR publishing contract stay aligned', () => {
   const dockerGuide = read('DOCKER.md');
   const compose = read('docker-compose.yml');
   const workflow = read('.github/workflows/docker-publish.yml');
+  const packageVersion = JSON.parse(read('package.json')).version;
 
   assert.match(readme, /\(DOCKER\.md\)/);
   assert.match(dockerGuide, /ghcr\.io\/huiyio\/freebuff2api-wokers/);
@@ -63,7 +65,7 @@ test('Docker documentation and GHCR publishing contract stay aligned', () => {
   assert.match(nonDockerGuide, /current\.next/);
   assert.match(nonDockerGuide, /rollback_on_exit/);
 
-  assert.match(compose, /ghcr\.io\/huiyio\/freebuff2api-wokers:1\.8\.9-admin\.2/);
+  assert.match(compose, new RegExp(`ghcr\\.io/huiyio/freebuff2api-wokers:${escapeRegExp(packageVersion)}`));
   assert.match(workflow, /packages: write/);
   assert.match(workflow, /secrets\.GITHUB_TOKEN/);
   assert.match(workflow, /linux\/amd64,linux\/arm64/);

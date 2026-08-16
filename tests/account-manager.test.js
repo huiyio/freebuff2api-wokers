@@ -246,3 +246,25 @@ test('rejects duplicate tokens and records a sanitized fixed-target proxy test',
     await fixture.close();
   }
 });
+
+test('reports a missing proxy as a public account error before building the route', async () => {
+  const fixture = await managerFixture();
+  try {
+    const created = await fixture.service.create({
+      name: 'Pending proxy account',
+      authToken: 'pending-proxy-account-token-12345',
+      proxyRequired: true,
+      enabled: false,
+    });
+
+    await assert.rejects(
+      fixture.service.testProxy(created.id),
+      (error) => error instanceof AccountServiceError
+        && error.status === 400
+        && error.code === 'ACCOUNT_PROXY_MISSING'
+        && /configure a proxy/i.test(error.message),
+    );
+  } finally {
+    await fixture.close();
+  }
+});
