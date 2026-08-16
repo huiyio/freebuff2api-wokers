@@ -163,6 +163,10 @@ export function createAdminHandler({
         return json({ accounts: accountService.list(health) });
       }
 
+      if ((path === '/admin/api/test-models' || path === '/admin/api/models/testable') && request.method === 'GET') {
+        return json({ models: accountService.listTestModels?.() || [] });
+      }
+
       if (path === '/admin/api/accounts' && request.method === 'POST') {
         const account = await accountService.create(await requestJson(request), session.actor);
         return json({ account }, 201);
@@ -210,8 +214,48 @@ export function createAdminHandler({
 
       const testMatch = /^\/admin\/api\/accounts\/([^/]+)\/(?:test-connection|test-proxy)$/.exec(path);
       if (testMatch && request.method === 'POST') {
-        const result = await accountService.testConnection(decodeURIComponent(testMatch[1]), session.actor);
+        // Keep the legacy endpoints body-free. The separate `test-proxy-check`
+        // endpoint is the explicit two-stage diagnostic used by the UI.
+        const result = await accountService.testConnection(
+          decodeURIComponent(testMatch[1]),
+          session.actor,
+        );
         return json(result);
+      }
+
+      const proxyTestMatch = /^\/admin\/api\/accounts\/([^/]+)\/test-proxy-check$/.exec(path);
+      if (proxyTestMatch && request.method === 'POST') {
+        await requestJson(request);
+        if (!accountService.testProxyConnection) {
+          throw new AccountServiceError('proxy test is unavailable', 503, 'PROXY_TEST_UNAVAILABLE');
+        }
+        return json(await accountService.testProxyConnection(
+          decodeURIComponent(proxyTestMatch[1]),
+          session.actor,
+        ));
+      }
+
+      const modelTestMatch = /^\/admin\/api\/accounts\/([^/]+)\/test-model$/.exec(path);
+      if (modelTestMatch && request.method === 'POST') {
+        const body = await requestJson(request);
+        if (typeof body.model !== 'string' || !body.model.trim()) {
+          throw new AccountServiceError('model is required', 400, 'MODEL_TEST_INVALID');
+        }
+        if (body.confirm !== true) {
+          throw new AccountServiceError(
+            'confirm the real model request before starting the test',
+            400,
+            'MODEL_TEST_CONFIRMATION_REQUIRED',
+          );
+        }
+        if (!accountService.testModel) {
+          throw new AccountServiceError('model test is unavailable', 503, 'MODEL_TEST_UNAVAILABLE');
+        }
+        return json(await accountService.testModel(
+          decodeURIComponent(modelTestMatch[1]),
+          body.model,
+          session.actor,
+        ));
       }
 
       if (path === '/admin/api/audit' && request.method === 'GET') {

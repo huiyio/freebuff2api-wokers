@@ -323,6 +323,36 @@
     </section>
   </dialog>
 
+  <dialog id="model-test-dialog" class="modal compact">
+    <form id="model-test-form">
+      <header class="modal-header">
+        <h3>模型测试</h3>
+        <button id="model-test-close-button" class="icon-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <p id="model-test-account" class="confirm-text"></p>
+      <label for="model-test-model">选择模型
+        <select id="model-test-model" required></select>
+      </label>
+      <p class="test-warning">将发送一条最短真实请求。该操作可能消耗该账号的一次 Freebuff 会话额度。</p>
+      <p id="model-test-status" class="authorization-status" aria-live="polite">尚未开始</p>
+      <section id="model-test-result" class="test-result hidden" aria-live="polite">
+        <dl class="test-result-list">
+          <div><dt>阶段</dt><dd id="model-test-phase">-</dd></div>
+          <div><dt>结果分类</dt><dd id="model-test-category">-</dd></div>
+          <div><dt>HTTP 状态</dt><dd id="model-test-http">-</dd></div>
+          <div><dt>延迟</dt><dd id="model-test-latency">-</dd></div>
+          <div><dt>账号封禁</dt><dd id="model-test-banned">-</dd></div>
+          <div class="test-preview-row"><dt>响应摘要</dt><dd id="model-test-preview">-</dd></div>
+        </dl>
+      </section>
+      <p id="model-test-error" class="form-error" role="alert"></p>
+      <footer class="modal-footer">
+        <button id="model-test-cancel-button" class="secondary" type="button">关闭</button>
+        <button id="model-test-submit" class="primary" type="submit">开始测试</button>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog id="delete-dialog" class="modal compact">
     <form id="delete-form" method="dialog">
       <header class="modal-header">

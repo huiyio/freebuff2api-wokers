@@ -324,3 +324,102 @@ test('keeps an account-level proxy requirement strict when global proxy mode is 
     await fixture.close();
   }
 });
+
+test('records a two-stage proxy test without treating a direct route as proxy success', async () => {
+  const fixture = await managerFixture([], { requireProxy: false });
+  try {
+    const created = await fixture.service.create({
+      name: 'Two stage proxy',
+      authToken: 'two-stage-proxy-account-token-12345',
+      proxyUrl: 'http://127.0.0.1:18081',
+      proxyRequired: true,
+      enabled: false,
+    });
+    const URLs = [];
+    const tested = await fixture.service.testProxyConnection(created.id, 'admin', {
+      proxyTestUrl: 'https://proxy-stage.test/',
+      freebuffTestUrl: 'https://freebuff-stage.test/',
+      fetchImpl: async (url, init) => {
+        URLs.push(url);
+        assert.ok(init.dispatcher);
+        return new Response(null, { status: 204 });
+      },
+    });
+    assert.equal(tested.result.ok, true);
+    assert.equal(tested.result.stages.proxy.ok, true);
+    assert.equal(tested.result.stages.freebuff.ok, true);
+    assert.deepEqual(URLs, ['https://proxy-stage.test/', 'https://freebuff-stage.test/']);
+    assert.equal(tested.account.lastProxyStatus, 'ok');
+    assert.match(fixture.store.listAudit()[0].action, /proxy\.test_succeeded/);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('runs a selected model tester for the requested account and audits only its outcome', async () => {
+  const fixture = await managerFixture([], { requireProxy: false });
+  try {
+    const created = await fixture.service.create({
+      name: 'Model test account',
+      authToken: 'model-test-managed-account-token-12345',
+      proxyRequired: false,
+      enabled: false,
+    });
+    fixture.service.modelTester = async (account, model) => {
+      assert.equal(account.id, created.id);
+      assert.equal(account.authToken, 'model-test-managed-account-token-12345');
+      assert.equal(model, 'mimo/mimo-v2.5');
+      return {
+        ok: false,
+        model,
+        category: 'banned',
+        banned: true,
+        httpStatus: 403,
+        message: 'Freebuff marked this account as banned',
+      };
+    };
+    const tested = await fixture.service.testModel(created.id, 'mimo/mimo-v2.5');
+    assert.equal(tested.result.banned, true);
+    assert.equal(tested.result.category, 'banned');
+    const audit = fixture.store.listAudit()[0];
+    assert.equal(audit.action, 'model.test_failed');
+    assert.doesNotMatch(audit.summary, /model-test-managed-account-token/);
+
+    const [listed] = fixture.service.list();
+    assert.equal(listed.canTestModel, true);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('allows connection checks on enabled accounts but keeps real model tests isolated', async () => {
+  const fixture = await managerFixture([], { requireProxy: false });
+  try {
+    const created = await fixture.service.create({
+      name: 'Active test account',
+      authToken: 'active-test-account-token-12345',
+      proxyRequired: false,
+      enabled: true,
+    });
+    const connection = await fixture.service.testConnection(created.id, 'admin', {
+      testUrl: 'https://connection-stage.test/',
+      fetchImpl: async () => new Response(null, { status: 204 }),
+    });
+    assert.equal(connection.result.ok, true);
+
+    fixture.service.modelTester = async () => {
+      throw new Error('model tester must not run for an enabled account');
+    };
+    await assert.rejects(
+      fixture.service.testModel(created.id, 'mimo/mimo-v2.5'),
+      (error) => error instanceof AccountServiceError
+        && error.status === 409
+        && error.code === 'ACCOUNT_MODEL_TEST_REQUIRES_DISABLED',
+    );
+    const [listed] = fixture.service.list();
+    assert.equal(listed.canTestConnection, true);
+    assert.equal(listed.canTestModel, false);
+  } finally {
+    await fixture.close();
+  }
+});

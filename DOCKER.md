@@ -14,16 +14,16 @@
 
 | 标签 | 是否可变 | 用途 |
 |---|---:|---|
-| `1.8.9-admin.4` 等版本标签 | 否 | 人工验收后的部署和回滚 |
+| `1.8.9-admin.5` 等版本标签 | 否 | 人工验收后的部署和回滚 |
 | `sha-<提交前12位>` | 否 | 每次维护分支推送对应的精确构建 |
 | `branch-codex-per-account-proxy` | 是 | 临时试用维护分支最新构建，不作为生产回滚点 |
 
 仓库不发布 `latest`。生产应固定版本标签、`sha-*` 标签，或进一步固定 Actions 输出的镜像 digest。
 
-当前推荐版本为 `1.8.9-admin.4`，GitHub Actions Run `31926669376` 已成功；多架构镜像 digest 为 `sha256:3f99c7d38fde3eb06aaa831988031fe4ea51cde2c564911637e778e55814e73c`。截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取：
+当前推荐版本为 `1.8.9-admin.5`。对应 Git tag 会触发 GitHub Actions 多架构构建；在构建完成前不要假设 digest，完成后应从 Actions 输出复制实际 digest。`1.8.9-admin.4` 的已验证回退 digest 为 `sha256:3f99c7d38fde3eb06aaa831988031fe4ea51cde2c564911637e778e55814e73c`。截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取：
 
 ```bash
-docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.4
+docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.5
 ```
 
 镜像发布完成后，从 Actions 构建摘要复制 digest，并在生产环境进一步固定为 `ghcr.io/huiyio/freebuff2api-wokers@sha256:...`。
@@ -48,7 +48,7 @@ store_key="$(openssl rand -hex 32)"
 admin_password="$(openssl rand -hex 24)"
 
 cat > .env <<EOF
-FREEBUFF_IMAGE=ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.4
+FREEBUFF_IMAGE=ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.5
 FREEBUFF_API_KEY=${api_key}
 ACCOUNT_STORE_KEY=${store_key}
 ADMIN_USERNAME=admin
@@ -77,7 +77,7 @@ function New-HexSecret([int]$Bytes) {
 }
 
 @(
-  "FREEBUFF_IMAGE=ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.4"
+"FREEBUFF_IMAGE=ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.5"
   "FREEBUFF_API_KEY=$(New-HexSecret 32)"
   "ACCOUNT_STORE_KEY=$(New-HexSecret 32)"
   "ADMIN_USERNAME=admin"
@@ -130,7 +130,30 @@ socks5://username:password@host:port
 socks5h://username:password@host:port
 ```
 
-用户名或密码含 `@`、`:`、`/`、`#` 等保留字符时必须进行 URL 编码。账号页“测试”会在有代理时测试代理出口，在全局和账号均允许直连且没有代理时测试服务器直连。`REQUIRE_ACCOUNT_PROXY=true` 或账号勾选“代理必需”时，每个启用账号都必须配置代理；连接失败直接报错，不会回退直连。代理只能改变出口，不能恢复或绕过上游标记为 `banned` 的账号。
+用户名或密码含 `@`、`:`、`/`、`#` 等保留字符时必须进行 URL 编码。`REQUIRE_ACCOUNT_PROXY=true` 或账号勾选“代理必需”时，每个启用账号都必须配置代理；连接失败直接报错，不会回退直连。代理只能改变出口，不能恢复或绕过上游标记为 `banned` 的账号。
+
+### 3.1 管理端测试
+
+账号页将两个层面明确分开：
+
+| 操作 | 验证内容 | 不验证的内容 |
+|---|---|---|
+| **代理测试** | 先通过该账号配置的代理访问中立连通性目标，再通过同一个调度器访问 `https://www.codebuff.com/`；两个阶段各自返回状态、HTTP 状态和延迟 | 不携带账号 Token，不创建 session，不能说明账号未封禁、Token 有效或模型有额度 |
+| **模型测试** | 仅对已停用账号的所选模型发送一次最短真实请求；返回脱敏响应摘要、HTTP 状态、延迟、封禁标记与诊断码 | 不是零消耗探测；若无法复用同模型的活动 session，创建 session 可能计入 Freebuff 上游额度 |
+
+没有代理时，外层“代理测试”和“模型测试”按钮仍可点击，以便给出明确配置状态；代理测试会返回 `ACCOUNT_PROXY_MISSING`，不会改走服务器直连。第一阶段失败时，第二阶段会显示为跳过；收到 HTTP 响应代表网络路径到达目标，HTTP 状态仍应结合结果判断。已停用账号的模型测试在全局和账号都允许直连时可以直连；严格模式或账号“代理必需”时，模型选择框会阻止提交并提示先配置代理，直接调用接口也会得到 `ACCOUNT_PROXY_MISSING`。两种测试均不会把 Token、完整代理 URL 或密码放进响应和审计摘要。
+
+模型测试会优先复用同模型的既有活动 session，绝不会替换或删除其他模型的活动 session。为避免影响正在服务的请求，管理 API 会拒绝对启用账号运行模型测试，先停用账号再操作。它会在结束时删除自己新建的 session，避免留下等待位，但 session 的创建仍可能已经消耗上游额度。请只在需要定位账号、模型或封禁问题时运行，不要将其当作高频健康检查。
+
+管理 API 只面向已登录管理员，所有变更请求还要求同源 CSRF Token：
+
+| 方法和路径 | 请求体 | 行为 |
+|---|---|---|
+| `GET /admin/api/test-models` | 无 | 返回管理端允许选择的模型目录 |
+| `POST /admin/api/accounts/:id/test-proxy-check` | `{}` | 执行“代理连接 -> 经代理访问 Freebuff”两阶段测试 |
+| `POST /admin/api/accounts/:id/test-model` | `{"model":"<模型 ID>","confirm":true}` | 执行真实模型请求；`confirm: true` 为必填确认，缺失时拒绝执行 |
+
+模型测试会将上游 `403 {"status":"banned"}` 归类为 `FREEBUFF_BANNED` 并标记 `banned: true`；额度、Token、会话冲突和超时也会返回各自的诊断码。代理测试成功不表示模型测试也会成功，反之亦然。
 
 Web 授权链接是短期能力凭据，只能由创建它的管理员会话查看；服务端只在“等待授权”状态的响应中返回链接，进入保存或终态后立即清除。后台轮询不依赖管理页面保持打开。不要转发链接、写入日志或在公网明文 HTTP 管理端使用；对外管理入口应由 HTTPS 反向代理保护。
 
@@ -166,7 +189,7 @@ docker compose run --rm --no-deps `
 
 ```bash
 docker volume create freebuff_data
-docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.4
+docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.5
 
 docker run -d --name freebuff2api --restart unless-stopped \
   -p 127.0.0.1:8877:8787 \
@@ -179,7 +202,7 @@ docker run -d --name freebuff2api --restart unless-stopped \
   -e ADMIN_PORT=8788 \
   -e ACCOUNT_DB_PATH=/app/data/freebuff.sqlite \
   --mount type=volume,src=freebuff_data,dst=/app/data \
-  ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.4
+ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.5
 ```
 
 旧账号导入也可用同一镜像运行一次性 `npm run import:credentials`；完整挂载参数参照上面的 Compose 示例。不要把明文凭据挂载到日常服务容器。

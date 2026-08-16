@@ -16,6 +16,7 @@ import {
   normalizeTokenEntry,
   parseProtectedHosts,
   probeAccountConnection,
+  probeAccountProxyStages,
 } from '../account-proxy.js';
 
 const TOKEN_A = 'test-token-account-a';
@@ -62,6 +63,82 @@ test('probes an optional direct account without installing a proxy dispatcher', 
   assert.equal(failed.mode, 'direct');
   assert.equal(failed.code, 'ACCOUNT_CONNECTION_ERROR');
   assert.doesNotMatch(failed.message, /unsafe direct failure detail/);
+});
+
+test('separates proxy transport and Freebuff reachability in a proxy test', async () => {
+  const account = createAccountRoute({
+    token: TOKEN_A,
+    source: 'proxy-stage-account',
+    proxyUrl: 'http://127.0.0.1:18080',
+    proxyRequired: true,
+  });
+  const seen = [];
+  const result = await probeAccountProxyStages(account, {
+    proxyTestUrl: 'https://proxy-stage.test/',
+    freebuffTestUrl: 'https://freebuff-stage.test/',
+    fetchImpl: async (url, init) => {
+      seen.push(url);
+      assert.equal(init.method, 'HEAD');
+      assert.ok(init.dispatcher);
+      return new Response(null, { status: url.includes('freebuff-stage') ? 204 : 200 });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.mode, 'proxy');
+  assert.equal(result.stages.proxy.ok, true);
+  assert.equal(result.stages.freebuff.ok, true);
+  assert.deepEqual(seen, ['https://proxy-stage.test/', 'https://freebuff-stage.test/']);
+
+  const failed = await probeAccountProxyStages(account, {
+    proxyTestUrl: 'https://proxy-stage.test/',
+    freebuffTestUrl: 'https://freebuff-stage.test/',
+    fetchImpl: async (url) => {
+      if (url.includes('proxy-stage')) throw Object.assign(new Error('unreachable'), { code: 'ECONNREFUSED' });
+      throw new Error('Freebuff stage should have been skipped');
+    },
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.stage, 'proxy');
+  assert.equal(failed.stages.proxy.code, 'ECONNREFUSED');
+  assert.equal(failed.stages.freebuff.skipped, true);
+});
+
+test('treats proxy authentication and upstream 5xx responses as failed proxy tests', async () => {
+  const account = createAccountRoute({
+    token: TOKEN_A,
+    source: 'proxy-http-status-account',
+    proxyUrl: 'http://127.0.0.1:18082',
+    proxyRequired: true,
+  });
+
+  const authFailed = await probeAccountProxyStages(account, {
+    proxyTestUrl: 'https://proxy-status.test/',
+    freebuffTestUrl: 'https://freebuff-status.test/',
+    fetchImpl: async () => new Response(null, { status: 407 }),
+  });
+  assert.equal(authFailed.ok, false);
+  assert.equal(authFailed.stage, 'proxy');
+  assert.equal(authFailed.stages.proxy.ok, false);
+  assert.equal(authFailed.stages.proxy.httpStatus, 407);
+  assert.equal(authFailed.stages.proxy.code, 'ACCOUNT_PROXY_AUTH_FAILED');
+  assert.equal(authFailed.stages.freebuff.skipped, true);
+
+  const seen = [];
+  const upstreamFailed = await probeAccountProxyStages(account, {
+    proxyTestUrl: 'https://proxy-status.test/',
+    freebuffTestUrl: 'https://freebuff-status.test/',
+    fetchImpl: async (url) => {
+      seen.push(url);
+      return new Response(null, { status: url.includes('freebuff-status') ? 503 : 204 });
+    },
+  });
+  assert.equal(upstreamFailed.ok, false);
+  assert.equal(upstreamFailed.stage, 'freebuff');
+  assert.equal(upstreamFailed.stages.proxy.ok, true);
+  assert.equal(upstreamFailed.stages.freebuff.ok, false);
+  assert.equal(upstreamFailed.stages.freebuff.httpStatus, 503);
+  assert.equal(upstreamFailed.stages.freebuff.code, 'FREEBUFF_TARGET_REJECTED');
+  assert.deepEqual(seen, ['https://proxy-status.test/', 'https://freebuff-status.test/']);
 });
 
 test('pins one proxy router generation for the full async operation', async () => {

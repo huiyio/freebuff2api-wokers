@@ -311,7 +311,16 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
       assert.equal(tested.status, 200);
       assert.equal((await tested.json()).result.mode, 'proxy');
     }
+    const bodyFreeLegacyTest = await handler(new Request(
+      `http://local/admin/api/accounts/${encodeURIComponent(createdPayload.account.id)}/test-connection`,
+      {
+        method: 'POST',
+        headers: { cookie: cookieHeader, 'x-csrf-token': loginPayload.csrfToken },
+      },
+    ));
+    assert.equal(bodyFreeLegacyTest.status, 200);
     assert.deepEqual(connectionTestCalls, [
+      { id: createdPayload.account.id, actor: 'admin' },
       { id: createdPayload.account.id, actor: 'admin' },
       { id: createdPayload.account.id, actor: 'admin' },
     ]);
@@ -1068,6 +1077,111 @@ test('trusted proxy mode rate limits forwarded clients independently', async () 
     assert.equal(allowed.status, 200);
   } finally {
     await stopChild(child);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('protects model and staged proxy test APIs with CSRF and explicit confirmation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'freebuff-admin-tests-api-'));
+  const store = new AccountStore({
+    databasePath: join(directory, 'admin.sqlite'),
+    vault: createCredentialVault('c1'.repeat(32)),
+  });
+  const runtime = new AccountRuntime({ store, requireProxy: false, retireMs: 0 });
+  runtime.initialize();
+  const service = new AccountService({ store, runtime, requireProxy: false });
+  const created = await service.create({
+    name: 'Test API account',
+    authToken: 'model-route-account-token-12345',
+    proxyRequired: false,
+    enabled: false,
+  });
+  const calls = [];
+  service.modelCatalog = () => [{ id: 'mimo/mimo-v2.5', name: 'MiMo' }];
+  service.modelTester = async (account, model) => {
+    calls.push({ kind: 'model', id: account.id, model });
+    return {
+      ok: true,
+      model,
+      category: 'ok',
+      httpStatus: 200,
+      latencyMs: 12,
+      banned: false,
+      responsePreview: 'OK',
+      message: 'model request succeeded',
+    };
+  };
+  service.testProxyConnection = async (id, actor) => {
+    calls.push({ kind: 'proxy', id, actor });
+    return {
+      result: {
+        ok: true,
+        mode: 'proxy',
+        stages: {
+          proxy: { ok: true, httpStatus: 204 },
+          freebuff: { ok: true, httpStatus: 200 },
+        },
+      },
+      account: { id },
+    };
+  };
+  const auth = await initializeAdminAuth({
+    store,
+    initialUsername: 'admin',
+    initialPassword: 'model-test-route-password',
+    sessionTtlSeconds: 3600,
+  });
+  const handler = createAdminHandler({
+    auth,
+    accountService: service,
+    uiDirectory: join(dirname(fileURLToPath(import.meta.url)), '..', 'admin-ui'),
+  });
+
+  try {
+    const login = await handler(new Request('http://local/admin/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'model-test-route-password' }),
+    }), { remoteAddress: '127.0.0.1' });
+    const loginPayload = await login.json();
+    const cookie = login.headers.getSetCookie().map((value) => value.split(';', 1)[0]).join('; ');
+    const headers = {
+      cookie,
+      'content-type': 'application/json',
+      'x-csrf-token': loginPayload.csrfToken,
+    };
+
+    const models = await handler(new Request('http://local/admin/api/test-models', { headers: { cookie } }));
+    assert.equal(models.status, 200);
+    assert.deepEqual((await models.json()).models, [{ id: 'mimo/mimo-v2.5', name: 'MiMo' }]);
+
+    const missingConfirmation = await handler(new Request(
+      `http://local/admin/api/accounts/${created.id}/test-model`,
+      { method: 'POST', headers, body: JSON.stringify({ model: 'mimo/mimo-v2.5' }) },
+    ));
+    assert.equal(missingConfirmation.status, 400);
+    assert.equal((await missingConfirmation.json()).error.type, 'MODEL_TEST_CONFIRMATION_REQUIRED');
+
+    const tested = await handler(new Request(
+      `http://local/admin/api/accounts/${created.id}/test-model`,
+      { method: 'POST', headers, body: JSON.stringify({ model: 'mimo/mimo-v2.5', confirm: true }) },
+    ));
+    assert.equal(tested.status, 200);
+    assert.equal((await tested.json()).result.ok, true);
+
+    const proxy = await handler(new Request(
+      `http://local/admin/api/accounts/${created.id}/test-proxy-check`,
+      { method: 'POST', headers, body: '{}' },
+    ));
+    assert.equal(proxy.status, 200);
+    assert.equal((await proxy.json()).result.stages.freebuff.ok, true);
+    assert.deepEqual(calls, [
+      { kind: 'model', id: created.id, model: 'mimo/mimo-v2.5' },
+      { kind: 'proxy', id: created.id, actor: 'admin' },
+    ]);
+  } finally {
+    await runtime.close();
+    store.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

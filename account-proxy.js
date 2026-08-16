@@ -425,6 +425,105 @@ export async function probeAccountProxy(account, options = {}) {
   return probeAccountConnection(account, options);
 }
 
+// A proxy test has two deliberately separate stages.  There is no portable
+// "ping a proxy" operation in HTTP/SOCKS, so stage one performs a request to
+// a neutral connectivity target.  Stage two uses the same dispatcher against
+// the fixed Freebuff origin.  Keeping the dispatcher alive between stages is
+// important: it verifies the actual route that the account will use.
+export async function probeAccountProxyStages(account, options = {}) {
+  if (!account?.proxy) {
+    throw new AccountProxyRequestError('account proxy route is unavailable', 'ACCOUNT_PROXY_REQUIRED');
+  }
+  const connectTimeoutMs = options.connectTimeoutMs ?? 10000;
+  const proxyTestUrl = options.proxyTestUrl || 'https://www.cloudflare.com/';
+  const freebuffTestUrl = options.freebuffTestUrl || 'https://www.codebuff.com/';
+  const fetchImpl = options.fetchImpl || undiciFetch;
+  let created = null;
+  const startedAt = Date.now();
+  const stages = {};
+
+  const runStage = async (name, url) => {
+    const stageStartedAt = Date.now();
+    try {
+      const requestInit = {
+        method: 'HEAD',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(connectTimeoutMs),
+        dispatcher: created.dispatcher,
+      };
+      const response = await fetchImpl(url, requestInit);
+      try { await response.body?.cancel(); } catch {}
+      const ok = response.status >= 200 && response.status < 400;
+      const result = {
+        ok,
+        reachable: true,
+        httpStatus: response.status,
+        latencyMs: Date.now() - stageStartedAt,
+        ...(ok ? {
+          message: name === 'proxy'
+            ? 'proxy connection established'
+            : 'proxy reached the Freebuff origin',
+        } : {
+          code: response.status === 407
+            ? 'ACCOUNT_PROXY_AUTH_FAILED'
+            : name === 'proxy'
+              ? 'ACCOUNT_PROXY_TARGET_REJECTED'
+              : 'FREEBUFF_TARGET_REJECTED',
+          message: name === 'proxy'
+            ? `proxy test target returned HTTP ${response.status}`
+            : `Freebuff returned HTTP ${response.status}`,
+        }),
+      };
+      stages[name] = result;
+      return result;
+    } catch (error) {
+      const safe = sanitizedConnectionError(error, 'proxy');
+      const result = {
+        ok: false,
+        code: safe.code,
+        latencyMs: Date.now() - stageStartedAt,
+        message: name === 'proxy'
+          ? safe.message
+          : `Freebuff request failed (${safe.code})`,
+      };
+      stages[name] = result;
+      return result;
+    }
+  };
+
+  try {
+    created = createDispatcher(account.proxy, connectTimeoutMs);
+    const proxy = await runStage('proxy', proxyTestUrl);
+    if (!proxy.ok) {
+      stages.freebuff = {
+        ok: false,
+        skipped: true,
+        message: 'skipped because the proxy connection failed',
+      };
+      return {
+        ok: false,
+        mode: 'proxy',
+        stage: 'proxy',
+        stages,
+        latencyMs: Date.now() - startedAt,
+        message: proxy.message,
+      };
+    }
+    const freebuff = await runStage('freebuff', freebuffTestUrl);
+    return {
+      ok: freebuff.ok,
+      mode: 'proxy',
+      stage: 'freebuff',
+      stages,
+      httpStatus: freebuff.httpStatus || null,
+      latencyMs: Date.now() - startedAt,
+      message: freebuff.ok ? 'proxy reached the Freebuff origin' : freebuff.message,
+    };
+  } finally {
+    try { await created?.dispatcher.close?.(); } catch {}
+  }
+}
+
 export function createAccountProxyRouter(accounts, options = {}) {
   const requireProxy = Boolean(options.requireProxy);
   const connectTimeoutMs = options.connectTimeoutMs ?? 10000;

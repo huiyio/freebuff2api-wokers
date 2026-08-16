@@ -4,6 +4,7 @@ const state = {
   csrfToken: '',
   username: '',
   accounts: [],
+  testModels: [],
   audit: [],
   system: {},
   apiKey: {},
@@ -16,6 +17,9 @@ const state = {
   authorizationController: null,
   authorizationEpoch: 0,
   authorizationClosing: false,
+  modelTestAccountId: null,
+  modelTestController: null,
+  modelTestEpoch: 0,
   sessionEpoch: 0,
   logoutPending: false,
   resourceRequests: {
@@ -23,6 +27,7 @@ const state = {
     audit: { sequence: 0, controller: null },
     system: { sequence: 0, controller: null },
     apiKey: { sequence: 0, controller: null },
+    testModels: { sequence: 0, controller: null },
   },
 };
 
@@ -96,6 +101,7 @@ function closeDialog(id) {
 function clearAdminPresentation() {
   invalidateResourceRequests();
   state.accounts = [];
+  state.testModels = [];
   state.audit = [];
   state.system = {};
   state.apiKey = {};
@@ -117,7 +123,11 @@ function clearAdminPresentation() {
   });
   $('#api-key-output').value = '';
   $('#api-key-reveal').classList.add('hidden');
-  ['account-dialog', 'delete-dialog', 'password-dialog', 'api-key-confirm-dialog'].forEach(closeDialog);
+  state.modelTestEpoch += 1;
+  state.modelTestController?.abort();
+  state.modelTestController = null;
+  state.modelTestAccountId = null;
+  ['account-dialog', 'delete-dialog', 'password-dialog', 'api-key-confirm-dialog', 'model-test-dialog'].forEach(closeDialog);
 }
 
 function invalidateResourceRequests() {
@@ -204,7 +214,7 @@ async function showApp(session) {
   clearAdminPresentation();
   state.csrfToken = session.csrfToken;
   state.username = session.username || '';
-  await Promise.all([loadAccounts(), loadSystem(), loadApiKey()]);
+  await Promise.all([loadAccounts(), loadSystem(), loadApiKey(), loadTestModels()]);
   if (sessionEpoch !== state.sessionEpoch) return;
   $('#login-view').classList.add('hidden');
   $('#app-shell').classList.remove('hidden');
@@ -271,9 +281,16 @@ function renderAccounts() {
   $('#accounts-empty').classList.toggle('hidden', accounts.length > 0);
   $('#accounts-table-body').innerHTML = accounts.map((account) => {
     const canTestConnection = account.canTestConnection === true;
-    const testTitle = canTestConnection
-      ? (account.connectionTestMode === 'direct' ? '测试服务器直连 Codebuff' : '测试账号代理出口')
-      : '该账号要求代理，请先编辑账号并配置代理';
+    const canTestProxy = account.canTestProxy === true || (!Object.hasOwn(account, 'canTestProxy') && canTestConnection);
+    const canTestModel = account.canTestModel === true;
+    const proxyTitle = canTestProxy
+      ? '先测试代理连接，再测试通过代理访问 Freebuff'
+      : '尚未配置代理；点击查看配置提示';
+    const modelTitle = account.enabled
+      ? '请先停用账号，避免中断正在使用的 Freebuff 会话'
+      : canTestModel
+        ? '选择模型并发送一次最短真实请求'
+        : '当前策略要求先配置代理；点击查看配置提示';
     return `
     <tr data-account-id="${escapeHtml(account.id)}">
       <td data-label="状态">${statusBadge(account)}</td>
@@ -292,7 +309,8 @@ function renderAccounts() {
       </td>
       <td data-label="操作">
         <div class="action-group">
-          <button class="table-action" type="button" data-action="test" title="${escapeHtml(testTitle)}" aria-label="${escapeHtml(testTitle)}" ${canTestConnection ? '' : 'disabled'}>测试</button>
+          <button class="table-action" type="button" data-action="proxy-test" title="${escapeHtml(proxyTitle)}" aria-label="${escapeHtml(proxyTitle)}">代理测试</button>
+          <button class="table-action model-test-action" type="button" data-action="model-test" title="${escapeHtml(modelTitle)}" aria-label="${escapeHtml(modelTitle)}">模型测试</button>
           <button class="table-action" type="button" data-action="toggle">${account.enabled ? '停用' : '启用'}</button>
           <button class="table-action" type="button" data-action="edit">编辑</button>
           <button class="table-action destructive" type="button" data-action="delete">删除</button>
@@ -312,6 +330,21 @@ async function loadAccounts({ quiet = false } = {}) {
     state.accounts = payload.accounts || [];
     renderAccounts();
     $('#accounts-updated').textContent = `更新于 ${new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date())}`;
+  } catch (error) {
+    if (!isCurrentResourceRequest(request) || error.name === 'AbortError') return;
+    if (error.status === 401) return showLogin();
+    if (!quiet) toast(error.message, 'error');
+  } finally {
+    finishResourceRequest(request);
+  }
+}
+
+async function loadTestModels({ quiet = false } = {}) {
+  const request = beginResourceRequest('testModels');
+  try {
+    const payload = await api('/test-models', { signal: request.controller.signal });
+    if (!isCurrentResourceRequest(request)) return;
+    state.testModels = Array.isArray(payload.models) ? payload.models : [];
   } catch (error) {
     if (!isCurrentResourceRequest(request) || error.name === 'AbortError') return;
     if (error.status === 401) return showLogin();
@@ -926,6 +959,10 @@ async function accountAction(event) {
     $('#delete-dialog').showModal();
     return;
   }
+  if (action === 'model-test') {
+    openModelTestDialog(account);
+    return;
+  }
 
   button.disabled = true;
   try {
@@ -943,6 +980,15 @@ async function accountAction(event) {
       const modeLabel = payload.result.mode === 'direct' ? '直连' : '代理';
       if (payload.result.ok) toast(`${modeLabel}可用，HTTP ${payload.result.httpStatus}`);
       else toast(payload.result.message || `${modeLabel}测试失败`, 'error');
+    } else if (action === 'proxy-test') {
+      const payload = await api(`/accounts/${encodeURIComponent(account.id)}/test-proxy-check`, {
+        method: 'POST',
+        body: '{}',
+      });
+      const stages = payload.result?.stages || {};
+      const proxyLabel = proxyStageMessage('代理连接', stages.proxy);
+      const freebuffLabel = proxyStageMessage('Freebuff 访问', stages.freebuff);
+      toast(`${proxyLabel} · ${freebuffLabel}`, payload.result?.ok ? 'success' : 'error');
     }
     await loadAccounts();
   } catch (error) {
@@ -950,6 +996,125 @@ async function accountAction(event) {
     await loadAccounts({ quiet: true });
   } finally {
     button.disabled = false;
+  }
+}
+
+function resetModelTestResult() {
+  $('#model-test-result').classList.add('hidden');
+  $('#model-test-error').textContent = '';
+  ['model-test-phase', 'model-test-category', 'model-test-http', 'model-test-latency', 'model-test-banned', 'model-test-preview'].forEach((id) => {
+    const node = $('#' + id);
+    if (node) node.textContent = '-';
+  });
+}
+
+function proxyStageMessage(label, stage) {
+  if (!stage) return `${label}无结果`;
+  if (stage.skipped) return `${label}已跳过`;
+  const details = [];
+  if (stage.httpStatus) details.push(`HTTP ${stage.httpStatus}`);
+  if (Number.isFinite(stage.latencyMs)) details.push(`${stage.latencyMs} ms`);
+  if (!stage.ok && stage.code) details.push(stage.code);
+  return `${label}${stage.ok ? '成功' : '失败'}${details.length ? ` (${details.join(' · ')})` : ''}`;
+}
+
+function renderModelTestResult(result = {}) {
+  $('#model-test-result').classList.remove('hidden');
+  $('#model-test-phase').textContent = result.phase || '-';
+  $('#model-test-category').textContent = result.category || result.code || '-';
+  $('#model-test-http').textContent = result.httpStatus ? String(result.httpStatus) : '-';
+  $('#model-test-latency').textContent = result.latencyMs != null ? `${result.latencyMs} ms` : '-';
+  $('#model-test-banned').textContent = result.banned ? '是' : '否';
+  $('#model-test-banned').className = result.banned ? 'result-danger' : 'result-ok';
+  $('#model-test-preview').textContent = result.responsePreview || '-';
+  $('#model-test-status').textContent = result.message || (result.ok ? '模型请求成功' : '模型请求失败');
+  $('#model-test-status').className = result.ok ? 'authorization-status result-ok' : 'authorization-status result-danger';
+}
+
+function populateModelTestSelect(preferred = '') {
+  const select = $('#model-test-model');
+  const models = state.testModels.length
+    ? state.testModels
+    : [{ id: 'mimo/mimo-v2.5', name: 'mimo/mimo-v2.5' }];
+  select.innerHTML = models.map((model) => {
+    const id = model.id || model.name;
+    return `<option value="${escapeHtml(id)}">${escapeHtml(model.name || id)}</option>`;
+  }).join('');
+  const next = preferred && models.some((model) => (model.id || model.name) === preferred)
+    ? preferred
+    : models[0] && (models[0].id || models[0].name);
+  if (next) select.value = next;
+}
+
+function openModelTestDialog(account) {
+  state.modelTestEpoch += 1;
+  state.modelTestController?.abort();
+  state.modelTestController = null;
+  state.modelTestAccountId = account.id;
+  $('#model-test-account').textContent = `${account.name}${account.email ? ` · ${account.email}` : ''}`;
+  populateModelTestSelect();
+  resetModelTestResult();
+  const canTestModel = account.canTestModel === true
+    || (!Object.hasOwn(account, 'canTestModel') && account.canTestConnection === true);
+  $('#model-test-submit').disabled = !canTestModel;
+  $('#model-test-submit').textContent = '开始测试';
+  if (!canTestModel) {
+    $('#model-test-status').textContent = account.enabled
+      ? '请先停用账号，再执行模型测试，避免中断正在使用的 Freebuff 会话。'
+      : '当前账号未配置代理，且当前策略要求账号通过代理访问 Freebuff。';
+    $('#model-test-status').className = 'authorization-status result-danger';
+  }
+  $('#model-test-dialog').showModal();
+  $('#model-test-model').focus();
+}
+
+function closeModelTestDialog() {
+  state.modelTestEpoch += 1;
+  state.modelTestController?.abort();
+  state.modelTestController = null;
+  state.modelTestAccountId = null;
+  closeDialog('model-test-dialog');
+}
+
+async function submitModelTest(event) {
+  event.preventDefault();
+  const accountId = state.modelTestAccountId;
+  const model = $('#model-test-model').value;
+  if (!accountId || !model) return;
+  const epoch = state.modelTestEpoch;
+  const button = $('#model-test-submit');
+  const controller = new AbortController();
+  state.modelTestController = controller;
+  button.disabled = true;
+  button.textContent = '测试中...';
+  $('#model-test-error').textContent = '';
+  $('#model-test-status').textContent = '正在创建会话并请求模型';
+  $('#model-test-status').className = 'authorization-status';
+  try {
+    const payload = await api(`/accounts/${encodeURIComponent(accountId)}/test-model`, {
+      method: 'POST',
+      body: JSON.stringify({ model, confirm: true }),
+      signal: controller.signal,
+    });
+    if (epoch !== state.modelTestEpoch) return;
+    renderModelTestResult(payload.result || {});
+    toast(payload.result?.ok ? '模型请求成功' : payload.result?.message || '模型测试失败', payload.result?.ok ? 'success' : 'error');
+    await loadAccounts({ quiet: true });
+  } catch (error) {
+    if (error.name === 'AbortError' || epoch !== state.modelTestEpoch) return;
+    if (error.status === 401 || isCsrfFailure(error)) {
+      closeModelTestDialog();
+      return showLogin();
+    }
+    $('#model-test-error').textContent = error.message;
+    $('#model-test-status').textContent = '测试未完成';
+    $('#model-test-status').className = 'authorization-status result-danger';
+  } finally {
+    if (state.modelTestController === controller) state.modelTestController = null;
+    if (epoch === state.modelTestEpoch) {
+      button.disabled = false;
+      button.textContent = '再次测试';
+    }
   }
 }
 
@@ -1045,6 +1210,13 @@ $('#account-form').addEventListener('submit', saveAccount);
 $('#delete-form').addEventListener('submit', deleteAccount);
 $('#password-form').addEventListener('submit', changePassword);
 $('#api-key-form').addEventListener('submit', saveApiKey);
+$('#model-test-form').addEventListener('submit', submitModelTest);
+$('#model-test-close-button').addEventListener('click', closeModelTestDialog);
+$('#model-test-cancel-button').addEventListener('click', closeModelTestDialog);
+$('#model-test-dialog').addEventListener('cancel', (event) => {
+  event.preventDefault();
+  closeModelTestDialog();
+});
 $('#accounts-table-body').addEventListener('click', accountAction);
 $('#account-search').addEventListener('input', renderAccounts);
 $('#account-filter').addEventListener('change', renderAccounts);

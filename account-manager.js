@@ -3,8 +3,14 @@ import {
   createAccountRoute,
   installReloadableAccountProxyFetch,
   normalizeTokenEntry,
+  probeAccountProxyStages,
   probeAccountConnection,
 } from './account-proxy.js';
+import {
+  AdminModelTestError,
+  listTestModels,
+  testAccountModel,
+} from './admin-model-tester.js';
 
 export class AccountServiceError extends Error {
   constructor(message, status = 400, code = 'ACCOUNT_INVALID') {
@@ -244,11 +250,20 @@ export class AccountRuntime {
 }
 
 export class AccountService {
-  constructor({ store, runtime, requireProxy = true, connectTimeoutMs = 10000 }) {
+  constructor({
+    store,
+    runtime,
+    requireProxy = true,
+    connectTimeoutMs = 10000,
+    modelTester = testAccountModel,
+    modelCatalog = listTestModels,
+  }) {
     this.store = store;
     this.runtime = runtime;
     this.requireProxy = requireProxy;
     this.connectTimeoutMs = connectTimeoutMs;
+    this.modelTester = modelTester;
+    this.modelCatalog = modelCatalog;
     this.mutationChain = Promise.resolve();
   }
 
@@ -267,6 +282,9 @@ export class AccountService {
         'ACCOUNT_PROXY_INVALID',
       );
     }
+    if (error instanceof AdminModelTestError) {
+      return new AccountServiceError(error.message, error.status, error.code);
+    }
     if (/UNIQUE constraint failed: accounts\.token_fingerprint/i.test(error?.message || '')) {
       return new AccountServiceError('this Freebuff token is already managed', 409, 'ACCOUNT_DUPLICATE');
     }
@@ -280,6 +298,8 @@ export class AccountService {
       return {
         ...account,
         canTestConnection: account.hasProxy || (!this.requireProxy && !account.proxyRequired),
+        canTestProxy: account.hasProxy,
+        canTestModel: !account.enabled && (account.hasProxy || (!this.requireProxy && !account.proxyRequired)),
         connectionTestMode: account.hasProxy ? 'proxy' : 'direct',
         upstreamAlive: account.enabled ? observation?.alive ?? null : null,
         upstreamState: account.enabled ? observation?.state || 'unknown' : 'disabled',
@@ -431,5 +451,83 @@ export class AccountService {
 
   testProxy(id, actor = 'admin', options = {}) {
     return this.testConnection(id, actor, options);
+  }
+
+  listTestModels() {
+    return this.modelCatalog();
+  }
+
+  testProxyConnection(id, actor = 'admin', options = {}) {
+    return this.#exclusive(async () => {
+      try {
+        const account = this.get(id, { includeSecrets: true });
+        if (!account.proxyUrl) {
+          throw new AccountServiceError(
+            'configure a proxy before running the proxy test',
+            400,
+            'ACCOUNT_PROXY_MISSING',
+          );
+        }
+        const route = accountRoute(account);
+        const result = await probeAccountProxyStages(route, {
+          connectTimeoutMs: this.connectTimeoutMs,
+          ...options,
+        });
+        let updated;
+        this.store.transaction(() => {
+          updated = this.store.setConnectionTest(id, result);
+          this.store.appendAudit({
+            actor,
+            action: result.ok ? 'proxy.test_succeeded' : 'proxy.test_failed',
+            accountId: id,
+            summary: result.ok
+              ? `Proxy and Freebuff test succeeded for ${account.name}`
+              : `Proxy test failed for ${account.name} at ${result.stage || 'unknown'} stage`,
+          });
+        });
+        return { result, account: updated };
+      } catch (error) {
+        throw this.#translateError(error);
+      }
+    });
+  }
+
+  testModel(id, model, actor = 'admin', options = {}) {
+    return this.#exclusive(async () => {
+      try {
+        const account = this.get(id, { includeSecrets: true });
+        // The upstream session endpoint can replace an active live session.
+        // Keep real probes isolated from accounts currently serving traffic.
+        if (account.enabled) {
+          throw new AccountServiceError(
+            'disable this account before running a model test to avoid interrupting live Freebuff sessions',
+            409,
+            'ACCOUNT_MODEL_TEST_REQUIRES_DISABLED',
+          );
+        }
+        if (!account.proxyUrl && (this.requireProxy || account.proxyRequired)) {
+          throw new AccountServiceError(
+            'configure a proxy before testing this account because proxy routing is required',
+            400,
+            'ACCOUNT_PROXY_MISSING',
+          );
+        }
+        const result = await this.modelTester(account, model, {
+          connectTimeoutMs: this.connectTimeoutMs,
+          ...options,
+        });
+        this.store.appendAudit({
+          actor,
+          action: result.ok ? 'model.test_succeeded' : 'model.test_failed',
+          accountId: id,
+          summary: result.ok
+            ? `Model test succeeded for ${account.name} (${result.model})`
+            : `Model test failed for ${account.name} (${result.model || String(model || 'unknown')}: ${result.category || 'unknown'})`,
+        });
+        return { result, account: this.store.getAccount(id) };
+      } catch (error) {
+        throw this.#translateError(error);
+      }
+    });
   }
 }

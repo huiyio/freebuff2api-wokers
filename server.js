@@ -23,6 +23,7 @@ import { initializeAdminAuth } from './admin-auth.js';
 import { createAdminHandler } from './admin-server.js';
 import { createCredentialVault } from './credential-vault.js';
 import { FreebuffAuthorizer } from './freebuff-authorizer.js';
+import { listTestModels, testAccountModel } from './admin-model-tester.js';
 import {
   DEFAULT_MAX_REQUEST_BODY_BYTES,
   parsePositiveInteger,
@@ -178,6 +179,11 @@ if (accountStore) {
     runtime,
     requireProxy: requireAccountProxy,
     connectTimeoutMs: accountProxyConnectTimeoutMs,
+    modelTester: (account, model, options = {}) => testAccountModel(account, model, {
+      ...options,
+      upstreamBaseUrl: process.env.CODEBUFF_API || undefined,
+    }),
+    modelCatalog: listTestModels,
   });
   freebuffAuthorizer = new FreebuffAuthorizer({ accountService });
 }

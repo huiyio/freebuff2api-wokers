@@ -246,6 +246,17 @@ async function main() {
       }
       mdLines.push("");
     }
+    mdLines.push(
+      "## 管理端测试说明",
+      "",
+      "此目录只表示可供选择的模型，不等同于任一账号、出口或额度一定可用。",
+      "",
+      "- **代理测试**先验证代理连接，再验证经同一代理访问 Freebuff；它不携带账号 Token、不创建 session，不能证明模型调用一定成功。",
+      "- **模型测试**仅对已停用账号在管理端选择模型后发送一次最短真实请求，可用于区分封禁、额度、Token、会话或模型问题；若需要新建 session，可能计入 Freebuff 上游额度。请只在明确确认后运行。",
+      "",
+      "完整测试流程、管理 API 和返回语义见 [DOCKER.md](DOCKER.md#31-管理端测试)。",
+      "",
+    );
     mdLines.push(`---`, `共 ${models.length} 个模型 · 上次更新：${beijingTime}`, "");
     writeFileSync(mdPath, mdLines.join("\n"));
     console.log(`✅ 生成 ${mdPath}`);

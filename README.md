@@ -21,6 +21,7 @@
 - 🧩 **OpenAI 兼容**：`/v1/models`、`/v1/chat/completions`、`/v1/responses`（流式/非流式视接口支持情况而定）
 - 📨 **Anthropic Messages API**：支持 `/v1/messages`、`/messages` 及对应的 `count_tokens` 路由，可供 Anthropic SDK / 兼容客户端尝试接入
 - ❤️ **健康检查**：`GET /healthz`（免鉴权），方便监控探活
+- 🧪 **分离的账号测试**：管理端将代理链路测试与真实模型请求测试分开，避免把出口故障、上游可达性、账号封禁和模型额度混为同一种错误
 - 📦 **两种运行层**：`worker.js` 可单文件部署；完整管理版需要 Node 24、npm 依赖和仓库内管理/迁移文件
 
 ## 📨 Anthropic Messages API 支持
@@ -93,7 +94,16 @@ curl https://你的worker.workers.dev/healthz
 
 `ADMIN_ENABLED=true` 时，登录管理端后在“账号”页点击“授权账号”就会自动开始生成一次性 Codebuff 授权链接；在新标签页完成你自己的账号登录后，服务端后台任务会独立轮询并把 Token 加密写入 SQLite，浏览器和审计日志不会收到 Token。关闭弹窗或管理页面不会中断任务，重新打开“授权账号”会继续同一个未完成授权，不会重复创建账号；只有“取消授权”、注销、会话失效或服务重启会终止任务。
 
-授权完成的账号始终先以**停用**状态保存，确认配置后再启用；严格代理模式下还必须先填写 HTTP/HTTPS/SOCKS5 代理，账号才可进入请求池。未配置代理时“测试”按钮为禁用状态，后端也会返回 `ACCOUNT_PROXY_MISSING`，不会将配置问题误报为内部服务错误。授权任务状态包含“生成中、等待授权、保存中、已完成/已取消/已过期”；取消、登出或会话失效会终止未完成任务。授权链接有效期很短，只能由当前管理员会话查看；请不要截图、转发或在明文 HTTP 管理端使用。公网管理端应先配置 HTTPS。
+授权完成的账号始终先以**停用**状态保存，确认配置后再启用；严格代理模式下还必须先填写 HTTP/HTTPS/SOCKS5 代理，账号才可进入请求池。即使没有代理，账号页的外层“代理测试”和“模型测试”仍可点击，以便显示明确的配置状态；代理测试会返回 `ACCOUNT_PROXY_MISSING`，而严格模式下模型测试会打开选择框但阻止提交，并提示先配置代理。启用操作仍要求满足严格代理规则。若全局与账号都允许直连，已停用账号的模型测试可以直连运行，但代理测试始终要求已配置代理。授权任务状态包含“生成中、等待授权、保存中、已完成/已取消/已过期”；取消、登出或会话失效会终止未完成任务。授权链接有效期很短，只能由当前管理员会话查看；请不要截图、转发或在明文 HTTP 管理端使用。公网管理端应先配置 HTTPS。
+
+### 管理端测试：代理与模型分开
+
+账号页提供两个不同用途的按钮，结果不能互相替代：
+
+- **代理测试**只验证网络路径，不使用账号 Token，也不会创建 Freebuff session。它先通过该账号的 HTTP/HTTPS/SOCKS5 代理访问中立连通性目标，再用同一个代理调度器访问 `https://www.codebuff.com/`。结果会分别显示“代理连接”和“Freebuff 访问”的成功、HTTP 状态、延迟或失败原因；第一阶段失败时第二阶段会标记为跳过。收到任意 HTTP 响应只说明该路径到达了目标，不能证明 Token 有效、账号未被封禁或模型可用。
+- **模型测试**会弹出模型选择框，并对所选模型发送一次最短的真实 Freebuff 请求，用于判断该账号和模型实际能否工作。为避免替换正在服务的 Freebuff session，它只允许对**已停用账号**运行。它会报告脱敏后的响应摘要、HTTP 状态、延迟、封禁标记及诊断码，例如 `FREEBUFF_BANNED`、`MODEL_QUOTA_EXHAUSTED`、`MODEL_TOKEN_INVALID` 或 `MODEL_SESSION_MISMATCH`。测试优先复用同模型的现有 session；没有可复用 session 时会创建一个新 session，因此**可能计入上游 session 额度**。测试结束会清理本次新建的 session，但这不会保证上游撤销已经计入的额度，请不要对真实账号反复点击。
+
+两个操作都要求已登录的管理员会话；非 GET 请求还需同源 CSRF Token。管理端先通过 `GET /admin/api/test-models` 读取可测试模型，再以 `POST /admin/api/accounts/:id/test-proxy-check` 执行代理测试，或以 `POST /admin/api/accounts/:id/test-model` 和 JSON `{"model":"<模型 ID>","confirm":true}` 执行模型测试。`confirm: true` 是服务端强制要求，避免外部脚本或误点无意触发真实模型请求。完整 Docker 管理 API 和返回语义见 [DOCKER.md](DOCKER.md#31-管理端测试)。
 
 ### 方式 A：GitHub Actions 工作流（推荐，远程提取）
 
@@ -148,9 +158,9 @@ Docker 版本包含 Web 管理端、加密 SQLite 账号库、API Key 轮换和�
 ghcr.io/huiyio/freebuff2api-wokers
 ```
 
-当前 Compose 默认固定不可变版本 `1.8.9-admin.4`，支持 `linux/amd64` 和 `linux/arm64`。仓库不发布 `latest`；升级和回滚应使用版本标签、`sha-<提交前12位>` 标签或镜像 digest。可变的 `branch-codex-per-account-proxy` 只用于临时试用。
+当前 Compose 默认固定不可变版本 `1.8.9-admin.5`，支持 `linux/amd64` 和 `linux/arm64`。仓库不发布 `latest`；升级和回滚应使用版本标签、`sha-<提交前12位>` 标签或镜像 digest。可变的 `branch-codex-per-account-proxy` 只用于临时试用。
 
-截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取；`1.8.9-admin.4` 的版本构建为 Actions Run `31926669376`，多架构 digest 为 `sha256:3f99c7d38fde3eb06aaa831988031fe4ea51cde2c564911637e778e55814e73c`。如果后续可见性改变，私有包才需要 `read:packages` PAT 登录，且不要把 PAT 写入配置或日志。
+截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取。`1.8.9-admin.5` 由对应 Git tag 的 Actions 版本构建发布，构建完成后应在 Actions 日志中记录并使用实际多架构 digest；上一版 `1.8.9-admin.4` 的已验证 digest 为 `sha256:3f99c7d38fde3eb06aaa831988031fe4ea51cde2c564911637e778e55814e73c`。如果后续可见性改变，私有包才需要 `read:packages` PAT 登录，且不要把 PAT 写入配置或日志。
 
 #### 直接使用 GitHub 构建镜像
 
@@ -179,7 +189,7 @@ socks5://username:password@host:port
 socks5h://username:password@host:port
 ```
 
-账号页“测试”会按当前路由测试固定 Codebuff 目标：配置代理时测试该账号的代理出口；没有代理且全局和账号均允许直连时测试服务器直连。`REQUIRE_ACCOUNT_PROXY=true` 或账号勾选“代理必需”时，缺少代理仍会禁用测试和启用操作；代理失败不会回退直连。代理只改变出口，不能恢复或绕过上游标记为 `banned` 的账号。
+账号页的“代理测试”和“模型测试”分别验证网络出口及真实模型调用，具体过程、额度影响和管理 API 见上方「管理端测试：代理与模型分开」。`REQUIRE_ACCOUNT_PROXY=true` 或账号勾选“代理必需”时，缺少代理会在测试界面显示配置提示并阻止真实模型请求，启用操作也会被拒绝；代理失败不会回退直连。代理只改变出口，不能恢复或绕过上游标记为 `banned` 的账号。
 
 完整文档：
 
