@@ -15,6 +15,7 @@ import {
   loadCredentialRecords,
   normalizeTokenEntry,
   parseProtectedHosts,
+  probeAccountConnection,
 } from '../account-proxy.js';
 
 const TOKEN_A = 'test-token-account-a';
@@ -29,6 +30,38 @@ test('rejects account delimiters inside one managed token entry', () => {
     () => normalizeTokenEntry('first-managed-token\nsecond-injected-token', 'web account'),
     /cannot contain commas or line breaks/,
   );
+});
+
+test('probes an optional direct account without installing a proxy dispatcher', async () => {
+  const account = createAccountRoute({
+    token: TOKEN_A,
+    source: 'direct-account',
+    proxyRequired: false,
+  });
+  const result = await probeAccountConnection(account, {
+    testUrl: 'https://fixed.test/',
+    fetchImpl: async (url, init) => {
+      assert.equal(url, 'https://fixed.test/');
+      assert.equal(init.method, 'HEAD');
+      assert.equal(Object.hasOwn(init, 'dispatcher'), false);
+      return new Response(null, { status: 204 });
+    },
+  });
+
+  assert.deepEqual({ ok: result.ok, mode: result.mode, httpStatus: result.httpStatus }, {
+    ok: true,
+    mode: 'direct',
+    httpStatus: 204,
+  });
+  assert.match(result.message, /direct connection/i);
+
+  const failed = await probeAccountConnection(account, {
+    fetchImpl: async () => { throw new Error('unsafe direct failure detail'); },
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.mode, 'direct');
+  assert.equal(failed.code, 'ACCOUNT_CONNECTION_ERROR');
+  assert.doesNotMatch(failed.message, /unsafe direct failure detail/);
 });
 
 test('pins one proxy router generation for the full async operation', async () => {

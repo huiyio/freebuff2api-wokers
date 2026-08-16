@@ -148,9 +148,9 @@ Docker 版本包含 Web 管理端、加密 SQLite 账号库、API Key 轮换和�
 ghcr.io/huiyio/freebuff2api-wokers
 ```
 
-当前 Compose 默认固定不可变版本 `1.8.9-admin.3`，支持 `linux/amd64` 和 `linux/arm64`。仓库不发布 `latest`；升级和回滚应使用版本标签、`sha-<提交前12位>` 标签或镜像 digest。可变的 `branch-codex-per-account-proxy` 只用于临时试用。
+当前 Compose 默认固定不可变版本 `1.8.9-admin.4`，支持 `linux/amd64` 和 `linux/arm64`。仓库不发布 `latest`；升级和回滚应使用版本标签、`sha-<提交前12位>` 标签或镜像 digest。可变的 `branch-codex-per-account-proxy` 只用于临时试用。
 
-截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取；`1.8.9-admin.3` 的多架构 digest 为 `sha256:67f193ddc1fa896d1f49d660d5d6e3e343bd222a1149a71c04eb494b70be2611`。如果后续可见性改变，私有包才需要 `read:packages` PAT 登录，且不要把 PAT 写入配置或日志。
+截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取。`1.8.9-admin.4` 的 Actions Run 和多架构 digest 会在不可变标签构建完成后记录到 [`DOCKER.md`](DOCKER.md)；如果后续可见性改变，私有包才需要 `read:packages` PAT 登录，且不要把 PAT 写入配置或日志。
 
 #### 直接使用 GitHub 构建镜像
 
@@ -179,7 +179,7 @@ socks5://username:password@host:port
 socks5h://username:password@host:port
 ```
 
-`REQUIRE_ACCOUNT_PROXY=true` 时代理缺失或连接失败会严格报错，不会回退直连。代理只改变出口，不能恢复或绕过上游标记为 `banned` 的账号。
+账号页“测试”会按当前路由测试固定 Codebuff 目标：配置代理时测试该账号的代理出口；没有代理且全局和账号均允许直连时测试服务器直连。`REQUIRE_ACCOUNT_PROXY=true` 或账号勾选“代理必需”时，缺少代理仍会禁用测试和启用操作；代理失败不会回退直连。代理只改变出口，不能恢复或绕过上游标记为 `banned` 的账号。
 
 完整文档：
 

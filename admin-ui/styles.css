@@ -36,7 +36,7 @@ body {
 
 button, input, select { font: inherit; letter-spacing: 0; }
 button { cursor: pointer; }
-button:disabled { cursor: wait; opacity: 0.6; }
+button:disabled { cursor: not-allowed; opacity: 0.6; }
 
 .hidden { display: none !important; }
 .muted { color: var(--muted); margin: 0; }

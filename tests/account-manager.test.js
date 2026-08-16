@@ -12,16 +12,16 @@ import {
 import { AccountStore } from '../account-store.js';
 import { createCredentialVault } from '../credential-vault.js';
 
-async function managerFixture(records = []) {
+async function managerFixture(records = [], { requireProxy = true } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'freebuff-account-manager-'));
   const store = new AccountStore({
     databasePath: join(directory, 'accounts.sqlite'),
     vault: createCredentialVault('61'.repeat(32)),
   });
-  importLegacyCredentials(store, records, { requireProxy: true });
+  importLegacyCredentials(store, records, { requireProxy });
   const runtime = new AccountRuntime({
     store,
-    requireProxy: true,
+    requireProxy,
     protectedHosts: new Set(['www.codebuff.com']),
     connectTimeoutMs: 100,
     retireMs: 0,
@@ -31,7 +31,7 @@ async function managerFixture(records = []) {
   runtime.setAccountStateInvalidator((tokens, activeTokenString) => {
     invalidations.push({ tokens: [...tokens], activeTokenString });
   });
-  const service = new AccountService({ store, runtime, requireProxy: true, connectTimeoutMs: 100 });
+  const service = new AccountService({ store, runtime, requireProxy, connectTimeoutMs: 100 });
   return {
     store,
     runtime,
@@ -240,8 +240,41 @@ test('rejects duplicate tokens and records a sanitized fixed-target proxy test',
       },
     });
     assert.equal(tested.result.ok, true);
+    assert.equal(tested.result.mode, 'proxy');
     assert.equal(tested.account.lastProxyStatus, 'ok');
     assert.doesNotMatch(JSON.stringify(fixture.store.listAudit()), /password|managed-account-token/);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('tests a direct account when global and account proxy requirements are disabled', async () => {
+  const fixture = await managerFixture([], { requireProxy: false });
+  try {
+    const created = await fixture.service.create({
+      name: 'Direct account',
+      authToken: 'direct-managed-account-token-12345',
+      proxyRequired: false,
+      enabled: true,
+    });
+    const [listed] = fixture.service.list();
+    assert.equal(listed.id, created.id);
+    assert.equal(listed.canTestConnection, true);
+    assert.equal(listed.connectionTestMode, 'direct');
+
+    const tested = await fixture.service.testConnection(created.id, 'admin', {
+      testUrl: 'https://fixed.test/',
+      fetchImpl: async (url, init) => {
+        assert.equal(url, 'https://fixed.test/');
+        assert.equal(Object.hasOwn(init, 'dispatcher'), false);
+        return new Response(null, { status: 204 });
+      },
+    });
+    assert.equal(tested.result.ok, true);
+    assert.equal(tested.result.mode, 'direct');
+    assert.equal(tested.account.lastProxyStatus, 'ok');
+    assert.match(tested.account.lastProxyMessage, /direct connection/i);
+    assert.doesNotMatch(JSON.stringify(fixture.store.listAudit()), /direct-managed-account-token/);
   } finally {
     await fixture.close();
   }
@@ -256,13 +289,36 @@ test('reports a missing proxy as a public account error before building the rout
       proxyRequired: true,
       enabled: false,
     });
+    assert.equal(fixture.service.list()[0].canTestConnection, false);
 
     await assert.rejects(
-      fixture.service.testProxy(created.id),
+      fixture.service.testConnection(created.id),
       (error) => error instanceof AccountServiceError
         && error.status === 400
         && error.code === 'ACCOUNT_PROXY_MISSING'
         && /configure a proxy/i.test(error.message),
+    );
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('keeps an account-level proxy requirement strict when global proxy mode is optional', async () => {
+  const fixture = await managerFixture([], { requireProxy: false });
+  try {
+    const created = await fixture.service.create({
+      name: 'Account-level strict',
+      authToken: 'account-level-strict-token-12345',
+      proxyRequired: true,
+      enabled: false,
+    });
+    const [listed] = fixture.service.list();
+    assert.equal(listed.canTestConnection, false);
+    assert.equal(listed.connectionTestMode, 'direct');
+    await assert.rejects(
+      fixture.service.testConnection(created.id),
+      (error) => error instanceof AccountServiceError
+        && error.code === 'ACCOUNT_PROXY_MISSING',
     );
   } finally {
     await fixture.close();

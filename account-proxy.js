@@ -353,10 +353,11 @@ function bearerToken(input, init) {
   return match ? match[1].trim() : null;
 }
 
-function sanitizedProxyError(error) {
+function sanitizedConnectionError(error, mode) {
+  const subject = mode === 'direct' ? 'direct connection' : 'account proxy request';
   const errorNames = new Set([error?.name, error?.cause?.name]);
   if (errorNames.has('AbortError')) {
-    const safe = new AccountProxyRequestError('account proxy request aborted', 'ABORT_ERR');
+    const safe = new AccountProxyRequestError(`${subject} aborted`, 'ABORT_ERR');
     safe.name = 'AbortError';
     return safe;
   }
@@ -366,49 +367,62 @@ function sanitizedProxyError(error) {
     || errorNames.has('ConnectTimeoutError')
     || TIMEOUT_NETWORK_CODES.has(rawCode)
   ) {
-    const safe = new AccountProxyRequestError('account proxy request timed out', 'ETIMEDOUT');
+    const safe = new AccountProxyRequestError(`${subject} timed out`, 'ETIMEDOUT');
     safe.name = 'TimeoutError';
     return safe;
   }
 
-  const code = SAFE_NETWORK_CODES.has(rawCode) ? rawCode : 'ACCOUNT_PROXY_ERROR';
-  return new AccountProxyRequestError(`account proxy request failed (${code})`, code);
+  const code = SAFE_NETWORK_CODES.has(rawCode)
+    ? rawCode
+    : mode === 'direct' ? 'ACCOUNT_CONNECTION_ERROR' : 'ACCOUNT_PROXY_ERROR';
+  return new AccountProxyRequestError(`${subject} failed (${code})`, code);
+}
+
+export async function probeAccountConnection(account, options = {}) {
+  const connectTimeoutMs = options.connectTimeoutMs ?? 10000;
+  const testUrl = options.testUrl || 'https://www.codebuff.com/';
+  const fetchImpl = options.fetchImpl || undiciFetch;
+  const mode = account?.proxy ? 'proxy' : 'direct';
+  let created = null;
+  const startedAt = Date.now();
+  try {
+    if (account?.proxy) created = createDispatcher(account.proxy, connectTimeoutMs);
+    const requestInit = {
+      method: 'HEAD',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(connectTimeoutMs),
+    };
+    if (created) requestInit.dispatcher = created.dispatcher;
+    const response = await fetchImpl(testUrl, requestInit);
+    try { await response.body?.cancel(); } catch {}
+    return {
+      ok: true,
+      mode,
+      httpStatus: response.status,
+      latencyMs: Date.now() - startedAt,
+      message: mode === 'proxy'
+        ? 'proxy reached the fixed upstream target'
+        : 'direct connection reached the fixed upstream target',
+    };
+  } catch (error) {
+    const safe = sanitizedConnectionError(error, mode);
+    return {
+      ok: false,
+      mode,
+      code: safe.code,
+      latencyMs: Date.now() - startedAt,
+      message: safe.message,
+    };
+  } finally {
+    try { await created?.dispatcher.close?.(); } catch {}
+  }
 }
 
 export async function probeAccountProxy(account, options = {}) {
   if (!account?.proxy) {
     throw new AccountProxyRequestError('account proxy route is unavailable', 'ACCOUNT_PROXY_REQUIRED');
   }
-  const connectTimeoutMs = options.connectTimeoutMs ?? 10000;
-  const testUrl = options.testUrl || 'https://www.codebuff.com/';
-  const fetchImpl = options.fetchImpl || undiciFetch;
-  const created = createDispatcher(account.proxy, connectTimeoutMs);
-  const startedAt = Date.now();
-  try {
-    const response = await fetchImpl(testUrl, {
-      method: 'HEAD',
-      redirect: 'manual',
-      dispatcher: created.dispatcher,
-      signal: AbortSignal.timeout(connectTimeoutMs),
-    });
-    try { await response.body?.cancel(); } catch {}
-    return {
-      ok: true,
-      httpStatus: response.status,
-      latencyMs: Date.now() - startedAt,
-      message: 'proxy reached the fixed upstream target',
-    };
-  } catch (error) {
-    const safe = sanitizedProxyError(error);
-    return {
-      ok: false,
-      code: safe.code,
-      latencyMs: Date.now() - startedAt,
-      message: safe.message,
-    };
-  } finally {
-    try { await created.dispatcher.close?.(); } catch {}
-  }
+  return probeAccountConnection(account, options);
 }
 
 export function createAccountProxyRouter(accounts, options = {}) {
@@ -455,7 +469,7 @@ export function createAccountProxyRouter(accounts, options = {}) {
       try {
         return await fetchImpl(normalized.input, { ...(normalized.init || {}), dispatcher: route.dispatcher });
       } catch (error) {
-        throw sanitizedProxyError(error);
+        throw sanitizedConnectionError(error, 'proxy');
       }
     }
 

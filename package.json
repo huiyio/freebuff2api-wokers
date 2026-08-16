@@ -1,6 +1,6 @@
 {
   "name": "freebuff2api-container",
-  "version": "1.8.9-admin.3",
+  "version": "1.8.9-admin.4",
   "type": "module",
   "private": true,
   "description": "freebuff2api Worker with encrypted web account management and per-account proxies",

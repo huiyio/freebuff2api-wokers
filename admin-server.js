@@ -208,9 +208,9 @@ export function createAdminHandler({
         return json({ ok: true });
       }
 
-      const testMatch = /^\/admin\/api\/accounts\/([^/]+)\/test-proxy$/.exec(path);
+      const testMatch = /^\/admin\/api\/accounts\/([^/]+)\/(?:test-connection|test-proxy)$/.exec(path);
       if (testMatch && request.method === 'POST') {
-        const result = await accountService.testProxy(decodeURIComponent(testMatch[1]), session.actor);
+        const result = await accountService.testConnection(decodeURIComponent(testMatch[1]), session.actor);
         return json(result);
       }
 

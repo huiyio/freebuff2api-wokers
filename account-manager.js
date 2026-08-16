@@ -3,7 +3,7 @@ import {
   createAccountRoute,
   installReloadableAccountProxyFetch,
   normalizeTokenEntry,
-  probeAccountProxy,
+  probeAccountConnection,
 } from './account-proxy.js';
 
 export class AccountServiceError extends Error {
@@ -279,6 +279,8 @@ export class AccountService {
       const observation = health.get(account.id);
       return {
         ...account,
+        canTestConnection: account.hasProxy || (!this.requireProxy && !account.proxyRequired),
+        connectionTestMode: account.hasProxy ? 'proxy' : 'direct',
         upstreamAlive: account.enabled ? observation?.alive ?? null : null,
         upstreamState: account.enabled ? observation?.state || 'unknown' : 'disabled',
       };
@@ -391,30 +393,33 @@ export class AccountService {
     });
   }
 
-  testProxy(id, actor = 'admin', options = {}) {
+  testConnection(id, actor = 'admin', options = {}) {
     return this.#exclusive(async () => {
       try {
         const account = this.get(id, { includeSecrets: true });
-        if (!account.proxyUrl) {
+        if (!account.proxyUrl && (this.requireProxy || account.proxyRequired)) {
           throw new AccountServiceError(
-            'configure a proxy before testing this account',
+            'configure a proxy before testing this account because proxy routing is required',
             400,
             'ACCOUNT_PROXY_MISSING',
           );
         }
         const route = accountRoute(account);
-        const result = await probeAccountProxy(route, {
+        const result = await probeAccountConnection(route, {
           connectTimeoutMs: this.connectTimeoutMs,
           ...options,
         });
+        const connectionLabel = result.mode === 'direct' ? 'Direct connection' : 'Proxy connection';
         let updated;
         this.store.transaction(() => {
-          updated = this.store.setProxyTest(id, result);
+          updated = this.store.setConnectionTest(id, result);
           this.store.appendAudit({
             actor,
-            action: result.ok ? 'proxy.test_succeeded' : 'proxy.test_failed',
+            action: result.ok ? 'connection.test_succeeded' : 'connection.test_failed',
             accountId: id,
-            summary: result.ok ? `Proxy test succeeded for ${account.name}` : `Proxy test failed for ${account.name}`,
+            summary: result.ok
+              ? `${connectionLabel} test succeeded for ${account.name}`
+              : `${connectionLabel} test failed for ${account.name}`,
           });
         });
         return { result, account: updated };
@@ -422,5 +427,9 @@ export class AccountService {
         throw this.#translateError(error);
       }
     });
+  }
+
+  testProxy(id, actor = 'admin', options = {}) {
+    return this.testConnection(id, actor, options);
   }
 }

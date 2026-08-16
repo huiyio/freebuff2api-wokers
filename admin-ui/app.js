@@ -226,7 +226,7 @@ async function initialize() {
 function statusBadge(account) {
   if (!account.enabled) return '<span class="status-badge status-neutral">已停用</span>';
   if (account.upstreamState === 'banned') return '<span class="status-badge status-error">已封禁</span>';
-  if (account.lastProxyStatus === 'error') return '<span class="status-badge status-error">代理异常</span>';
+  if (account.lastProxyStatus === 'error') return '<span class="status-badge status-error">连接异常</span>';
   if (account.lastProxyStatus === 'ok') return '<span class="status-badge status-ok">运行中</span>';
   return '<span class="status-badge status-warning">待验证</span>';
 }
@@ -269,7 +269,12 @@ function renderMetrics() {
 function renderAccounts() {
   const accounts = filteredAccounts();
   $('#accounts-empty').classList.toggle('hidden', accounts.length > 0);
-  $('#accounts-table-body').innerHTML = accounts.map((account) => `
+  $('#accounts-table-body').innerHTML = accounts.map((account) => {
+    const canTestConnection = account.canTestConnection === true;
+    const testTitle = canTestConnection
+      ? (account.connectionTestMode === 'direct' ? '测试服务器直连 Codebuff' : '测试账号代理出口')
+      : '该账号要求代理，请先编辑账号并配置代理';
+    return `
     <tr data-account-id="${escapeHtml(account.id)}">
       <td data-label="状态">${statusBadge(account)}</td>
       <td data-label="账号">
@@ -281,20 +286,21 @@ function renderAccounts() {
         <span class="account-email">${escapeHtml(account.proxyProtocol || '-')}</span>
       </td>
       <td data-label="上游">${upstreamBadge(account)}</td>
-      <td data-label="最近代理测试">
+      <td data-label="最近连接测试">
         <span>${escapeHtml(account.lastProxyStatus === 'ok' ? `${account.lastProxyHttpStatus || '-'} · ${account.lastProxyMessage || ''}` : account.lastProxyMessage || '-')}</span>
         <span class="account-email">${formatTime(account.lastProxyTestAt)}</span>
       </td>
       <td data-label="操作">
         <div class="action-group">
-          <button class="table-action" type="button" data-action="test" ${account.hasProxy ? '' : 'disabled title="请先编辑账号并配置代理"'}>测试</button>
+          <button class="table-action" type="button" data-action="test" title="${escapeHtml(testTitle)}" aria-label="${escapeHtml(testTitle)}" ${canTestConnection ? '' : 'disabled'}>测试</button>
           <button class="table-action" type="button" data-action="toggle">${account.enabled ? '停用' : '启用'}</button>
           <button class="table-action" type="button" data-action="edit">编辑</button>
           <button class="table-action destructive" type="button" data-action="delete">删除</button>
         </div>
       </td>
     </tr>
-  `).join('');
+    `;
+  }).join('');
   renderMetrics();
 }
 
@@ -908,7 +914,7 @@ async function saveAccount(event) {
 
 async function accountAction(event) {
   const button = event.target.closest('[data-action]');
-  if (!button) return;
+  if (!button || button.disabled) return;
   const row = button.closest('[data-account-id]');
   const account = state.accounts.find((item) => item.id === row?.dataset.accountId);
   if (!account) return;
@@ -930,12 +936,13 @@ async function accountAction(event) {
       });
       toast(account.enabled ? '账号已停用' : '账号已启用');
     } else if (action === 'test') {
-      const payload = await api(`/accounts/${encodeURIComponent(account.id)}/test-proxy`, {
+      const payload = await api(`/accounts/${encodeURIComponent(account.id)}/test-connection`, {
         method: 'POST',
         body: '{}',
       });
-      if (payload.result.ok) toast(`代理可用，HTTP ${payload.result.httpStatus}`);
-      else toast(payload.result.message || '代理测试失败', 'error');
+      const modeLabel = payload.result.mode === 'direct' ? '直连' : '代理';
+      if (payload.result.ok) toast(`${modeLabel}可用，HTTP ${payload.result.httpStatus}`);
+      else toast(payload.result.message || `${modeLabel}测试失败`, 'error');
     }
     await loadAccounts();
   } catch (error) {

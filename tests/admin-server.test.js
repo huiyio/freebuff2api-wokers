@@ -194,6 +194,7 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     assert.match(pageText, /account-authorization-dialog/);
     assert.match(pageText, /authorize-account-button/);
     assert.match(pageText, /导入 Token（高级）/);
+    assert.match(pageText, /最近连接测试/);
     assert.match(pageText, /rel="noopener noreferrer"/);
     assert.match(pageText, /integration-docs/);
     assert.match(pageText, /integration-base-url/);
@@ -213,6 +214,8 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     assert.match(appText, /void startAuthorization\(\)/);
     assert.match(appText, /authorization-close-button.*hideAuthorizationDialog/s);
     assert.match(appText, /authorization-cancel-button.*cancelAuthorizationDialog/s);
+    assert.match(appText, /canTestConnection/);
+    assert.match(appText, /test-connection/);
 
     const stylesAsset = await handler(new Request('http://local/admin/styles.css'));
     assert.equal(stylesAsset.status, 200);
@@ -290,6 +293,28 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
       }),
     }));
     assert.equal(created.status, 201);
+    const createdPayload = await created.json();
+
+    const connectionTestCalls = [];
+    service.testConnection = async (id, actor) => {
+      connectionTestCalls.push({ id, actor });
+      return {
+        result: { ok: true, mode: 'proxy', httpStatus: 204, message: 'proxy reached target' },
+        account: { id, lastProxyStatus: 'ok' },
+      };
+    };
+    for (const route of ['test-connection', 'test-proxy']) {
+      const tested = await handler(new Request(
+        `http://local/admin/api/accounts/${encodeURIComponent(createdPayload.account.id)}/${route}`,
+        { method: 'POST', headers: mutationHeaders, body: '{}' },
+      ));
+      assert.equal(tested.status, 200);
+      assert.equal((await tested.json()).result.mode, 'proxy');
+    }
+    assert.deepEqual(connectionTestCalls, [
+      { id: createdPayload.account.id, actor: 'admin' },
+      { id: createdPayload.account.id, actor: 'admin' },
+    ]);
 
     const listed = await handler(new Request('http://local/admin/api/accounts', {
       headers: { cookie: cookieHeader },

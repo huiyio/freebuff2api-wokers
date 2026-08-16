@@ -185,7 +185,7 @@ export class AccountStore {
     return this.db.prepare('DELETE FROM accounts WHERE id = ?').run(id).changes > 0;
   }
 
-  setProxyTest(id, result) {
+  setConnectionTest(id, result) {
     const testedAt = nowIso();
     this.db.prepare(`
       UPDATE accounts
@@ -195,12 +195,16 @@ export class AccountStore {
     `).run(
       result.ok ? 'ok' : 'error',
       result.httpStatus || null,
-      truncate(result.message || (result.ok ? 'proxy reachable' : 'proxy test failed')),
+      truncate(result.message || (result.ok ? 'connection reachable' : 'connection test failed')),
       testedAt,
       testedAt,
       id,
     );
     return this.getAccount(id);
+  }
+
+  setProxyTest(id, result) {
+    return this.setConnectionTest(id, result);
   }
 
   appendAudit({ actor = 'admin', action, accountId = null, summary }) {

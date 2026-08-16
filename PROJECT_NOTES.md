@@ -60,7 +60,7 @@ Node 管理侧：
 
 - 公开 API 默认监听 `8787`，Compose 宿主机默认映射 `127.0.0.1:8877`。
 - 管理端默认监听 `8788`，Compose 宿主机默认映射 `127.0.0.1:8878`。
-- 管理端支持管理员账号/密码登录、账号增删改、启停、搜索、代理测试、审计查看、管理员密码修改，以及 API Key 设置/轮换和 OpenAI/Anthropic 接入文档。
+- 管理端支持管理员账号/密码登录、账号增删改、启停、搜索、连接测试（每账号代理或服务器直连）、审计查看、管理员密码修改，以及 API Key 设置/轮换和 OpenAI/Anthropic 接入文档。
 - `POST /admin/api/account-authorizations` 会立即返回 `starting` 任务并启动服务端后台轮询；同一 ID 的 `POST` 只读取/刷新当前状态，状态为 `pending` 时才返回一次性登录链接；`DELETE` 取消任务。任务按管理员会话隔离，重复开始会复用活动任务，管理页面关闭不会中断。
 - `GET /admin/api/api-key` 只返回 `configured`、掩码和更新时间；`PUT /admin/api/api-key` 支持自定义值或 `{ "generate": true }`，明文只在当前响应中返回一次。
 
@@ -143,6 +143,7 @@ Node 管理侧：
 - 非 Docker 服务器已升级：`/opt/freebuff2api/current -> /opt/freebuff2api/releases/501775a`，`/opt/freebuff2api/releases/80a4563` 保留供回滚；备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260816T034715Z` 与 `/var/backups/freebuff2api/freebuff2api.env.20260816T034715Z`。Node `v24.19.0`、systemd `freebuff2api.service`、管理层 `1.8.9-admin.3` 验证通过。
 - `.3` 服务器验收：健康端点 200、无 Key 的 `/v1/models` 返回 401、管理页 200、未登录管理 API 返回 401；实际加密库内有 2 个账号且均未配置代理，对其中一个执行脱敏回归返回 400 `ACCOUNT_PROXY_MISSING`。运行时可用账号仍为 0，因此公开健康状态显示 `critical` 是当前配置的预期结果。
 - 按部署运营方选择，该服务器于 2026-08-16 将 `/etc/freebuff2api/freebuff2api.env` 的 `REQUIRE_ACCOUNT_PROXY` 从 `true` 改为 `false`，备份为 `/var/backups/freebuff2api/freebuff2api.env.20260816T035858Z-proxy-optional`。代码和 Docker 默认值仍保持严格模式；该服务器改为由每账号“代理必需”开关决定是否强制代理。当时 2 个账号均未勾选、未配置代理且未启用，服务重启日志已确认 `required=false`；本次没有自动启用或修改账号。
+- `1.8.9-admin.4` 修复无代理账号的测试按钮判定：服务端返回 `canTestConnection`，有代理时测试代理出口，无代理且全局与账号均允许直连时测试服务器直连；全局严格模式或账号级“代理必需”仍返回 `ACCOUNT_PROXY_MISSING`。旧 `/test-proxy` 路由保留兼容，管理页改用 `/test-connection`。本地语法检查和 74/74 测试已通过，发布与服务器切换待完成。
 - 当前服务器管理端仍明文监听 `0.0.0.0:8788`，公网授权前必须改用 HTTPS 反向代理或 SSH 隧道；此前通过聊天暴露的服务器登录密码待轮换。
 - 没有使用真实 Freebuff 凭据做 session/chat 端到端测试；上游 `banned` 行为和额度仍未验证。
 
@@ -157,7 +158,7 @@ Node 管理侧：
 
 ## 10. 当前未完成事项
 
-- 功能分支尚未合并到 `main`；`v1.8.9-admin.3` 已发布并部署到非 Docker 服务器。
+- 功能分支尚未合并到 `main`；`v1.8.9-admin.3` 仍是当前已部署回滚点，`v1.8.9-admin.4` 正在发布与部署。
 - 未在本机实际构建 Docker 镜像（环境缺少 Docker CLI）。
 - 尚未用真实账号验证上游 session/chat/额度；也未承诺固定模型额度或解除封禁。
 - 未实现跨 Cloudflare isolate 的全局账号协调；当前 Worker 仍是 isolate-local 状态。
