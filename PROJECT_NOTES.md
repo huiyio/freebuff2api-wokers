@@ -40,6 +40,7 @@
 ## 1.2 代理测试延迟结果弹窗
 
 - 提交 `0396a3a` 将代理测试改为持久结果弹窗，分别显示代理连接阶段延迟、经同一代理访问 Freebuff 的延迟、两阶段 HTTP 状态和总耗时；完成 Toast 也保留三项延迟摘要。关闭弹窗会取消仍在进行的浏览器请求，结果不写入 Token、完整代理 URL 或代理密码。
+- 缺少代理时的代理/连接测试仍返回 `400 ACCOUNT_PROXY_MISSING`，但现在会先记录失败状态、原因和时间到账号的“最近连接测试”；模型测试仍只写独立审计记录，不冒充连接测试。
 - 本地与远端 `npm run check`、`npm test` 均通过（86/86）。非 Docker 云服务器已切换到 `/opt/freebuff2api/releases/0396a3abd215467017af166101a1209498700214`，旧 `b06b969004151a0733052cc60b921f7c35c9154f` release 保留；数据库与环境备份时间戳为 `20260816T065122Z`。
 - GitHub Actions Run `31932208975` 已成功构建并发布分支镜像 `ghcr.io/huiyio/freebuff2api-wokers:sha-0396a3abd215`，多架构索引 digest 为 `sha256:5e202a83e85415a2abeb4a306de2946f7e6f4f5c58da412ecab4d7490d2ed2df`。
 - 远端和公网验收：systemd active/enabled，管理页 200 且包含总耗时/两阶段延迟字段，健康端点 200，无 Key 的 `/v1/models` 返回 401；数据库和备份均为 2 个账号、0 个启用账号，未读取或输出账号 Token。

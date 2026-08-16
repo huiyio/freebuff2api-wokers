@@ -298,6 +298,36 @@ test('reports a missing proxy as a public account error before building the rout
         && error.code === 'ACCOUNT_PROXY_MISSING'
         && /configure a proxy/i.test(error.message),
     );
+    const recorded = fixture.store.getAccount(created.id);
+    assert.equal(recorded.lastProxyStatus, 'error');
+    assert.match(recorded.lastProxyMessage, /configure a proxy/i);
+    assert.ok(Date.parse(recorded.lastProxyTestAt));
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('records a failed staged proxy test when the account has no proxy', async () => {
+  const fixture = await managerFixture([], { requireProxy: false });
+  try {
+    const created = await fixture.service.create({
+      name: 'Missing staged proxy',
+      authToken: 'missing-staged-proxy-account-token-12345',
+      proxyRequired: false,
+      enabled: false,
+    });
+
+    await assert.rejects(
+      fixture.service.testProxyConnection(created.id),
+      (error) => error instanceof AccountServiceError
+        && error.status === 400
+        && error.code === 'ACCOUNT_PROXY_MISSING',
+    );
+    const recorded = fixture.store.getAccount(created.id);
+    assert.equal(recorded.lastProxyStatus, 'error');
+    assert.match(recorded.lastProxyMessage, /running the proxy test/i);
+    assert.ok(Date.parse(recorded.lastProxyTestAt));
+    assert.equal(fixture.store.listAudit()[0].action, 'connection.test_failed');
   } finally {
     await fixture.close();
   }

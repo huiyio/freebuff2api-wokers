@@ -291,6 +291,27 @@ export class AccountService {
     return error;
   }
 
+  #recordConnectionFailure(id, actor, account, { mode = 'proxy', code, message }) {
+    const result = {
+      ok: false,
+      mode,
+      code,
+      latencyMs: 0,
+      message,
+    };
+    let updated;
+    this.store.transaction(() => {
+      updated = this.store.setConnectionTest(id, result);
+      this.store.appendAudit({
+        actor,
+        action: 'connection.test_failed',
+        accountId: id,
+        summary: `${mode === 'proxy' ? 'Proxy' : 'Connection'} test failed for ${account.name} (${code})`,
+      });
+    });
+    return { result, account: updated };
+  }
+
   list(accountDetails = []) {
     const health = this.runtime.mapHealth(accountDetails);
     return this.store.listAccounts().map((account) => {
@@ -418,8 +439,14 @@ export class AccountService {
       try {
         const account = this.get(id, { includeSecrets: true });
         if (!account.proxyUrl && (this.requireProxy || account.proxyRequired)) {
+          const message = 'configure a proxy before testing this account because proxy routing is required';
+          this.#recordConnectionFailure(id, actor, account, {
+            mode: 'proxy',
+            code: 'ACCOUNT_PROXY_MISSING',
+            message,
+          });
           throw new AccountServiceError(
-            'configure a proxy before testing this account because proxy routing is required',
+            message,
             400,
             'ACCOUNT_PROXY_MISSING',
           );
@@ -462,8 +489,14 @@ export class AccountService {
       try {
         const account = this.get(id, { includeSecrets: true });
         if (!account.proxyUrl) {
+          const message = 'configure a proxy before running the proxy test';
+          this.#recordConnectionFailure(id, actor, account, {
+            mode: 'proxy',
+            code: 'ACCOUNT_PROXY_MISSING',
+            message,
+          });
           throw new AccountServiceError(
-            'configure a proxy before running the proxy test',
+            message,
             400,
             'ACCOUNT_PROXY_MISSING',
           );
