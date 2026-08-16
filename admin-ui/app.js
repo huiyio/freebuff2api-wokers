@@ -20,6 +20,9 @@ const state = {
   modelTestAccountId: null,
   modelTestController: null,
   modelTestEpoch: 0,
+  proxyTestAccountId: null,
+  proxyTestController: null,
+  proxyTestEpoch: 0,
   sessionEpoch: 0,
   logoutPending: false,
   resourceRequests: {
@@ -127,7 +130,11 @@ function clearAdminPresentation() {
   state.modelTestController?.abort();
   state.modelTestController = null;
   state.modelTestAccountId = null;
-  ['account-dialog', 'delete-dialog', 'password-dialog', 'api-key-confirm-dialog', 'model-test-dialog'].forEach(closeDialog);
+  state.proxyTestEpoch += 1;
+  state.proxyTestController?.abort();
+  state.proxyTestController = null;
+  state.proxyTestAccountId = null;
+  ['account-dialog', 'delete-dialog', 'password-dialog', 'api-key-confirm-dialog', 'model-test-dialog', 'proxy-test-dialog'].forEach(closeDialog);
 }
 
 function invalidateResourceRequests() {
@@ -981,14 +988,7 @@ async function accountAction(event) {
       if (payload.result.ok) toast(`${modeLabel}可用，HTTP ${payload.result.httpStatus}`);
       else toast(payload.result.message || `${modeLabel}测试失败`, 'error');
     } else if (action === 'proxy-test') {
-      const payload = await api(`/accounts/${encodeURIComponent(account.id)}/test-proxy-check`, {
-        method: 'POST',
-        body: '{}',
-      });
-      const stages = payload.result?.stages || {};
-      const proxyLabel = proxyStageMessage('代理连接', stages.proxy);
-      const freebuffLabel = proxyStageMessage('Freebuff 访问', stages.freebuff);
-      toast(`${proxyLabel} · ${freebuffLabel}`, payload.result?.ok ? 'success' : 'error');
+      await runProxyTest(account);
     }
     await loadAccounts();
   } catch (error) {
@@ -1012,10 +1012,121 @@ function proxyStageMessage(label, stage) {
   if (!stage) return `${label}无结果`;
   if (stage.skipped) return `${label}已跳过`;
   const details = [];
-  if (stage.httpStatus) details.push(`HTTP ${stage.httpStatus}`);
-  if (Number.isFinite(stage.latencyMs)) details.push(`${stage.latencyMs} ms`);
+  if (stage.httpStatus != null) details.push(`HTTP ${stage.httpStatus}`);
+  const latency = formatLatency(stage.latencyMs);
+  if (latency !== '-') details.push(latency);
   if (!stage.ok && stage.code) details.push(stage.code);
   return `${label}${stage.ok ? '成功' : '失败'}${details.length ? ` (${details.join(' · ')})` : ''}`;
+}
+
+function formatLatency(value) {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? `${numeric} ms` : '-';
+}
+
+function resetProxyTestResult() {
+  $('#proxy-test-result').classList.add('hidden');
+  $('#proxy-test-message').textContent = '';
+  $('#proxy-test-status').textContent = '尚未开始';
+  $('#proxy-test-status').className = 'authorization-status';
+  [
+    'proxy-test-total-latency',
+    'proxy-test-proxy-status',
+    'proxy-test-proxy-http',
+    'proxy-test-proxy-latency',
+    'proxy-test-freebuff-status',
+    'proxy-test-freebuff-http',
+    'proxy-test-freebuff-latency',
+  ].forEach((id) => {
+    const node = $('#' + id);
+    if (node) node.textContent = '-';
+  });
+}
+
+function renderProxyStageResult(prefix, stage) {
+  const status = $(`#proxy-test-${prefix}-status`);
+  const http = $(`#proxy-test-${prefix}-http`);
+  const latency = $(`#proxy-test-${prefix}-latency`);
+  if (!stage) {
+    status.textContent = '无结果';
+    status.className = 'result-danger';
+    http.textContent = '-';
+    latency.textContent = '-';
+    return;
+  }
+  if (stage.skipped) {
+    status.textContent = '已跳过';
+    status.className = '';
+  } else {
+    status.textContent = stage.ok ? '成功' : '失败';
+    status.className = stage.ok ? 'result-ok' : 'result-danger';
+  }
+  http.textContent = stage.httpStatus ? String(stage.httpStatus) : '-';
+  latency.textContent = formatLatency(stage.latencyMs);
+}
+
+function renderProxyTestResult(result = {}) {
+  $('#proxy-test-result').classList.remove('hidden');
+  $('#proxy-test-total-latency').textContent = formatLatency(result.latencyMs);
+  renderProxyStageResult('proxy', result.stages?.proxy);
+  renderProxyStageResult('freebuff', result.stages?.freebuff);
+  $('#proxy-test-status').textContent = result.message || (result.ok ? '代理和 Freebuff 访问均正常' : '代理测试失败');
+  $('#proxy-test-status').className = result.ok ? 'authorization-status result-ok' : 'authorization-status result-danger';
+  $('#proxy-test-message').textContent = [
+    result.stages?.proxy?.message || result.stages?.proxy?.code,
+    result.stages?.freebuff?.message || result.stages?.freebuff?.code,
+  ].filter(Boolean).join(' · ');
+}
+
+function closeProxyTestDialog() {
+  state.proxyTestEpoch += 1;
+  state.proxyTestController?.abort();
+  state.proxyTestController = null;
+  state.proxyTestAccountId = null;
+  closeDialog('proxy-test-dialog');
+}
+
+async function runProxyTest(account) {
+  closeProxyTestDialog();
+  state.proxyTestEpoch += 1;
+  const epoch = state.proxyTestEpoch;
+  state.proxyTestAccountId = account.id;
+  resetProxyTestResult();
+  $('#proxy-test-account').textContent = `${account.name}${account.email ? ` · ${account.email}` : ''}`;
+  $('#proxy-test-dialog').showModal();
+  $('#proxy-test-status').textContent = '正在测试代理连接，再测试 Freebuff 访问';
+  const controller = new AbortController();
+  state.proxyTestController = controller;
+  try {
+    const payload = await api(`/accounts/${encodeURIComponent(account.id)}/test-proxy-check`, {
+      method: 'POST',
+      body: '{}',
+      signal: controller.signal,
+    });
+    if (epoch !== state.proxyTestEpoch) return;
+    const result = payload.result || {};
+    renderProxyTestResult(result);
+    const stages = result.stages || {};
+    const total = Number.isFinite(Number(result.latencyMs)) ? `总计 ${formatLatency(result.latencyMs)}` : '';
+    const labels = [
+      proxyStageMessage('代理连接', stages.proxy),
+      proxyStageMessage('Freebuff 访问', stages.freebuff),
+      total,
+    ].filter(Boolean);
+    toast(labels.join(' · '), result.ok ? 'success' : 'error');
+  } catch (error) {
+    if (error.name === 'AbortError' || epoch !== state.proxyTestEpoch) return;
+    if (error.status === 401 || isCsrfFailure(error)) {
+      closeProxyTestDialog();
+      showLogin();
+      return;
+    }
+    $('#proxy-test-message').textContent = error.message;
+    $('#proxy-test-status').textContent = '测试未完成';
+    $('#proxy-test-status').className = 'authorization-status result-danger';
+  } finally {
+    if (state.proxyTestController === controller) state.proxyTestController = null;
+  }
 }
 
 function renderModelTestResult(result = {}) {
@@ -1216,6 +1327,12 @@ $('#model-test-cancel-button').addEventListener('click', closeModelTestDialog);
 $('#model-test-dialog').addEventListener('cancel', (event) => {
   event.preventDefault();
   closeModelTestDialog();
+});
+$('#proxy-test-close-button').addEventListener('click', closeProxyTestDialog);
+$('#proxy-test-cancel-button').addEventListener('click', closeProxyTestDialog);
+$('#proxy-test-dialog').addEventListener('cancel', (event) => {
+  event.preventDefault();
+  closeProxyTestDialog();
 });
 $('#accounts-table-body').addEventListener('click', accountAction);
 $('#account-search').addEventListener('input', renderAccounts);

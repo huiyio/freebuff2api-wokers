@@ -353,6 +353,32 @@
     </form>
   </dialog>
 
+  <dialog id="proxy-test-dialog" class="modal compact">
+    <section class="proxy-test-dialog-content">
+      <header class="modal-header">
+        <h3>代理测试结果</h3>
+        <button id="proxy-test-close-button" class="icon-close" type="button" data-close-dialog="proxy-test-dialog" aria-label="关闭">×</button>
+      </header>
+      <p id="proxy-test-account" class="confirm-text"></p>
+      <p id="proxy-test-status" class="authorization-status" aria-live="polite">尚未开始</p>
+      <section id="proxy-test-result" class="test-result hidden" aria-live="polite">
+        <dl class="test-result-list">
+          <div><dt>总耗时</dt><dd id="proxy-test-total-latency">-</dd></div>
+          <div><dt>代理连接</dt><dd id="proxy-test-proxy-status">-</dd></div>
+          <div><dt>代理 HTTP</dt><dd id="proxy-test-proxy-http">-</dd></div>
+          <div><dt>代理延迟</dt><dd id="proxy-test-proxy-latency">-</dd></div>
+          <div><dt>Freebuff 访问</dt><dd id="proxy-test-freebuff-status">-</dd></div>
+          <div><dt>Freebuff HTTP</dt><dd id="proxy-test-freebuff-http">-</dd></div>
+          <div><dt>Freebuff 延迟</dt><dd id="proxy-test-freebuff-latency">-</dd></div>
+        </dl>
+      </section>
+      <p id="proxy-test-message" class="muted"></p>
+      <footer class="modal-footer">
+        <button id="proxy-test-cancel-button" class="secondary" type="button" data-close-dialog="proxy-test-dialog">关闭</button>
+      </footer>
+    </section>
+  </dialog>
+
   <dialog id="delete-dialog" class="modal compact">
     <form id="delete-form" method="dialog">
       <header class="modal-header">

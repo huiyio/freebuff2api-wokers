@@ -193,6 +193,10 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     assert.match(pageText, /api-key-confirm-dialog/);
     assert.match(pageText, /account-authorization-dialog/);
     assert.match(pageText, /authorize-account-button/);
+    assert.match(pageText, /proxy-test-dialog/);
+    assert.match(pageText, /proxy-test-total-latency/);
+    assert.match(pageText, /proxy-test-proxy-latency/);
+    assert.match(pageText, /proxy-test-freebuff-latency/);
     assert.match(pageText, /导入 Token（高级）/);
     assert.match(pageText, /最近连接测试/);
     assert.match(pageText, /rel="noopener noreferrer"/);
@@ -216,6 +220,9 @@ test('serves a hardened admin UI and keeps credentials out of CRUD responses', a
     assert.match(appText, /authorization-cancel-button.*cancelAuthorizationDialog/s);
     assert.match(appText, /canTestConnection/);
     assert.match(appText, /test-connection/);
+    assert.match(appText, /runProxyTest/);
+    assert.match(appText, /formatLatency/);
+    assert.match(appText, /test-proxy-check/);
 
     const stylesAsset = await handler(new Request('http://local/admin/styles.css'));
     assert.equal(stylesAsset.status, 200);
@@ -1118,9 +1125,10 @@ test('protects model and staged proxy test APIs with CSRF and explicit confirmat
         ok: true,
         mode: 'proxy',
         stages: {
-          proxy: { ok: true, httpStatus: 204 },
-          freebuff: { ok: true, httpStatus: 200 },
+          proxy: { ok: true, httpStatus: 204, latencyMs: 18 },
+          freebuff: { ok: true, httpStatus: 200, latencyMs: 42 },
         },
+        latencyMs: 60,
       },
       account: { id },
     };
@@ -1174,7 +1182,11 @@ test('protects model and staged proxy test APIs with CSRF and explicit confirmat
       { method: 'POST', headers, body: '{}' },
     ));
     assert.equal(proxy.status, 200);
-    assert.equal((await proxy.json()).result.stages.freebuff.ok, true);
+    const proxyPayload = await proxy.json();
+    assert.equal(proxyPayload.result.stages.freebuff.ok, true);
+    assert.equal(proxyPayload.result.stages.proxy.latencyMs, 18);
+    assert.equal(proxyPayload.result.stages.freebuff.latencyMs, 42);
+    assert.equal(proxyPayload.result.latencyMs, 60);
     assert.deepEqual(calls, [
       { kind: 'model', id: created.id, model: 'mimo/mimo-v2.5' },
       { kind: 'proxy', id: created.id, actor: 'admin' },
