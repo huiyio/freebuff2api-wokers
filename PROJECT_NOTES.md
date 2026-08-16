@@ -6,7 +6,7 @@
 上游远端：`https://github.com/pingmike2/freebuff2api-wokers.git`
 同步基线：`origin/main` = `a01b8b9b35681a96da6cebd822ded628cc06989d`
 
-> 当前改造维护在 `codex/per-account-proxy` 功能分支，尚未合并到 `main` 或生产部署。工作区和远端分支的真实状态以 Git 为准；不要把本文件中的示例凭据当作可用账号。
+> 当前改造维护在 `codex/per-account-proxy` 功能分支，尚未合并到 `main`；非 Docker 云服务器的实际部署状态记录在下文。工作区和远端分支的真实状态以 Git 为准；不要把本文件中的示例凭据当作可用账号。
 
 ## 1. 项目定位
 
@@ -36,6 +36,14 @@
 - 当全局或账号策略要求代理而账号未配置代理时，外层两个按钮仍可点击以显示明确的配置状态；模型测试弹窗会阻止提交，接口也会返回 `ACCOUNT_PROXY_MISSING`。当策略允许直连时，已停用账号的模型测试可直连运行。
 - 本地 `npm.cmd run check`、`npm.cmd test`（86/86）和 `npm.cmd audit --omit=dev` 已通过。没有对真实 Freebuff 账号执行模型测试，也没有从 SQLite 读取或输出 Token。
 - GitHub 分支提交 `b06b969` 与标签 `v1.8.9-admin.5` 已推送；GitHub Actions Run `31930472641` 成功发布了 GHCR 多架构索引 `sha256:428724656e0e5447914d009474b21e4c7954645f041f56c4d6cf5274b105c31f`。非 Docker 云服务器已原子切换到 `/opt/freebuff2api/releases/b06b969004151a0733052cc60b921f7c35c9154f`，旧 `195d575` release 保留；备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260816T062121Z` 与对应环境文件。远端 86/86 测试、systemd、管理页模型测试标记、健康 200 和未授权 models 401 均通过。
+
+## 1.2 代理测试延迟结果弹窗
+
+- 提交 `0396a3a` 将代理测试改为持久结果弹窗，分别显示代理连接阶段延迟、经同一代理访问 Freebuff 的延迟、两阶段 HTTP 状态和总耗时；完成 Toast 也保留三项延迟摘要。关闭弹窗会取消仍在进行的浏览器请求，结果不写入 Token、完整代理 URL 或代理密码。
+- 本地与远端 `npm run check`、`npm test` 均通过（86/86）。非 Docker 云服务器已切换到 `/opt/freebuff2api/releases/0396a3abd215467017af166101a1209498700214`，旧 `b06b969004151a0733052cc60b921f7c35c9154f` release 保留；数据库与环境备份时间戳为 `20260816T065122Z`。
+- GitHub Actions Run `31932208975` 已成功构建并发布分支镜像 `ghcr.io/huiyio/freebuff2api-wokers:sha-0396a3abd215`，多架构索引 digest 为 `sha256:5e202a83e85415a2abeb4a306de2946f7e6f4f5c58da412ecab4d7490d2ed2df`。
+- 远端和公网验收：systemd active/enabled，管理页 200 且包含总耗时/两阶段延迟字段，健康端点 200，无 Key 的 `/v1/models` 返回 401；数据库和备份均为 2 个账号、0 个启用账号，未读取或输出账号 Token。
+- 第一次切换前检查误用了 Debian 不支持的 `systemctl is-inactive`，返回 `Unknown command verb 'is-inactive'` 后自动回滚并重启旧 release；修正为读取 `systemctl is-active` 状态后再次执行，备份和原子切换成功。
 
 ## 2. 入口与文件职责
 
@@ -170,7 +178,7 @@ Node 管理侧：
 
 ## 10. 当前未完成事项
 
-- 功能分支尚未合并到 `main`；`v1.8.9-admin.5` 已发布并部署到非 Docker 服务器，旧 `195d575` release 保留为回滚点。
+- 功能分支尚未合并到 `main`；`v1.8.9-admin.5` 已发布，非 Docker 服务器当前运行提交 `0396a3a`，旧 `b06b969` release 保留为回滚点。
 - 未在本机实际构建 Docker 镜像（环境缺少 Docker CLI）。
 - 尚未用真实账号验证上游 session/chat/额度；也未承诺固定模型额度或解除封禁。
 - 未实现跨 Cloudflare isolate 的全局账号协调；当前 Worker 仍是 isolate-local 状态。
