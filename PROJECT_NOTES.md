@@ -142,6 +142,7 @@ Node 管理侧：
 - GitHub Actions 版本构建 [Run 31924881405](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31924881405) 成功：`ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.3`，digest `sha256:67f193ddc1fa896d1f49d660d5d6e3e343bd222a1149a71c04eb494b70be2611`，包含 amd64/arm64、SBOM 和 provenance；匿名 registry manifest 请求返回 200。
 - 非 Docker 服务器已升级：`/opt/freebuff2api/current -> /opt/freebuff2api/releases/501775a`，`/opt/freebuff2api/releases/80a4563` 保留供回滚；备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260816T034715Z` 与 `/var/backups/freebuff2api/freebuff2api.env.20260816T034715Z`。Node `v24.19.0`、systemd `freebuff2api.service`、管理层 `1.8.9-admin.3` 验证通过。
 - `.3` 服务器验收：健康端点 200、无 Key 的 `/v1/models` 返回 401、管理页 200、未登录管理 API 返回 401；实际加密库内有 2 个账号且均未配置代理，对其中一个执行脱敏回归返回 400 `ACCOUNT_PROXY_MISSING`。运行时可用账号仍为 0，因此公开健康状态显示 `critical` 是当前配置的预期结果。
+- 按部署运营方选择，该服务器于 2026-08-16 将 `/etc/freebuff2api/freebuff2api.env` 的 `REQUIRE_ACCOUNT_PROXY` 从 `true` 改为 `false`，备份为 `/var/backups/freebuff2api/freebuff2api.env.20260816T035858Z-proxy-optional`。代码和 Docker 默认值仍保持严格模式；该服务器改为由每账号“代理必需”开关决定是否强制代理。当时 2 个账号均未勾选、未配置代理且未启用，服务重启日志已确认 `required=false`；本次没有自动启用或修改账号。
 - 当前服务器管理端仍明文监听 `0.0.0.0:8788`，公网授权前必须改用 HTTPS 反向代理或 SSH 隧道；此前通过聊天暴露的服务器登录密码待轮换。
 - 没有使用真实 Freebuff 凭据做 session/chat 端到端测试；上游 `banned` 行为和额度仍未验证。
 
