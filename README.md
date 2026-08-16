@@ -93,7 +93,7 @@ curl https://你的worker.workers.dev/healthz
 
 `ADMIN_ENABLED=true` 时，登录管理端后在“账号”页点击“授权账号”就会自动开始生成一次性 Codebuff 授权链接；在新标签页完成你自己的账号登录后，服务端后台任务会独立轮询并把 Token 加密写入 SQLite，浏览器和审计日志不会收到 Token。关闭弹窗或管理页面不会中断任务，重新打开“授权账号”会继续同一个未完成授权，不会重复创建账号；只有“取消授权”、注销、会话失效或服务重启会终止任务。
 
-授权完成的账号始终先以**停用**状态保存，确认配置后再启用；严格代理模式下还必须先填写 HTTP/HTTPS/SOCKS5 代理，账号才可进入请求池。授权任务状态包含“生成中、等待授权、保存中、已完成/已取消/已过期”；取消、登出或会话失效会终止未完成任务。授权链接有效期很短，只能由当前管理员会话查看；请不要截图、转发或在明文 HTTP 管理端使用。公网管理端应先配置 HTTPS。
+授权完成的账号始终先以**停用**状态保存，确认配置后再启用；严格代理模式下还必须先填写 HTTP/HTTPS/SOCKS5 代理，账号才可进入请求池。未配置代理时“测试”按钮为禁用状态，后端也会返回 `ACCOUNT_PROXY_MISSING`，不会将配置问题误报为内部服务错误。授权任务状态包含“生成中、等待授权、保存中、已完成/已取消/已过期”；取消、登出或会话失效会终止未完成任务。授权链接有效期很短，只能由当前管理员会话查看；请不要截图、转发或在明文 HTTP 管理端使用。公网管理端应先配置 HTTPS。
 
 ### 方式 A：GitHub Actions 工作流（推荐，远程提取）
 
@@ -148,9 +148,9 @@ Docker 版本包含 Web 管理端、加密 SQLite 账号库、API Key 轮换和�
 ghcr.io/huiyio/freebuff2api-wokers
 ```
 
-当前 Compose 默认固定不可变版本 `1.8.9-admin.2`，支持 `linux/amd64` 和 `linux/arm64`。仓库不发布 `latest`；升级和回滚应使用版本标签、`sha-<提交前12位>` 标签或镜像 digest。可变的 `branch-codex-per-account-proxy` 只用于临时试用。
+当前 Compose 默认固定不可变版本 `1.8.9-admin.3`，支持 `linux/amd64` 和 `linux/arm64`。仓库不发布 `latest`；升级和回滚应使用版本标签、`sha-<提交前12位>` 标签或镜像 digest。可变的 `branch-codex-per-account-proxy` 只用于临时试用。
 
-截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取；`1.8.9-admin.2` 的多架构 digest 为 `sha256:3ef37c0cb272a609536fb6088e60e4c59b003be85d167436a3cfea6457388a33`。如果后续可见性改变，私有包才需要 `read:packages` PAT 登录，且不要把 PAT 写入配置或日志。
+截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取；`1.8.9-admin.3` 的多架构 digest 为 `sha256:67f193ddc1fa896d1f49d660d5d6e3e343bd222a1149a71c04eb494b70be2611`。如果后续可见性改变，私有包才需要 `read:packages` PAT 登录，且不要把 PAT 写入配置或日志。
 
 #### 直接使用 GitHub 构建镜像
 

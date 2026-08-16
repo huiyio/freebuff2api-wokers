@@ -123,21 +123,25 @@ Node 管理侧：
 截至 2026-08-16：
 
 - `npm.cmd run check`：通过。
-- `npm.cmd test`：70/70 通过，包含管理员账号初始化/旧库补齐/重启会话撤销、并发改密串行化、API Key 轮换、Web 授权会话隔离与脱敏、页面关闭后的服务端后台轮询、授权任务并发 start/poll、写库跨期限回滚、取消/超时终态屏障、重叠注销/改密排空期间阻止新授权、登出/密码修改撤销、每账号代理、并发 session 创建串行化，以及 Docker/GHCR 文档契约回归。
+- `npm.cmd test`：71/71 通过，包含管理员账号初始化/旧库补齐/重启会话撤销、并发改密串行化、API Key 轮换、Web 授权会话隔离与脱敏、页面关闭后的服务端后台轮询、授权任务并发 start/poll、写库跨期限回滚、取消/超时终态屏障、重叠注销/改密排空期间阻止新授权、登出/密码修改撤销、缺少代理时的公开错误分类、每账号代理、并发 session 创建串行化，以及 Docker/GHCR 文档契约回归。
 - `npm.cmd audit --omit=dev`：0 vulnerabilities。
 - `npm.cmd ci --ignore-scripts --omit=dev --dry-run`：通过。
 - `git diff --check`：通过；仅有 Windows 行尾转换提示。
 - Wrangler `4.123.0` dry-run：通过，约 87.7 KiB，gzip 约 20.2 KiB，无 bindings。
 - 2026-08-16 匿名上游协议检查：授权码接口返回 200、字段与链接域名/路径符合预期，未登录状态查询返回 401 JSON；未使用或输出任何账号凭据。
 - 已完成真实管理端登录、账号列表和预览 UI 检查，预览使用合成账号；没有读取或发送真实 Token。
-- Playwright 桌面/390px 移动端检查：授权按钮自动启动、延迟响应关闭弹窗后任务仍复用、明确“取消授权”才发送 DELETE，页面无横向溢出。
+- Playwright 桌面/390px 移动端检查：授权按钮自动启动、延迟响应关闭弹窗后任务仍复用、明确“取消授权”才发送 DELETE，无代理账号的“测试”按钮禁用，页面无横向溢出。
 - 本机没有 Docker/Compose，因此本地未 build 或启动镜像；多架构镜像由 GitHub Actions 在 Linux runner 上构建，运行结果和 digest 应以 Actions/GHCR 记录为准。
 - GitHub Actions 版本构建 [Run 31893248200](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31893248200) 成功：`ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.1`，digest `sha256:6f36e3502497637ac8120cdf98ccbfca25169effb58798a6fcacd82449a1241c`，包含 amd64/arm64、SBOM 和 provenance。
 - GitHub Actions 分支构建 [Run 31893248217](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31893248217) 成功：`sha-7043f800c93f`，digest `sha256:63083a709a37bfb01600fe7c90989ccc6b90c5cfa91929673442fb3c767d188d`；分支便利标签同步发布。
 - GitHub Actions 最终分支构建 [Run 31905293846](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31905293846) 成功，对应提交 `80a4563a16cb16b1b0f193e47accee30e6611560`。
 - GitHub Actions 版本构建 [Run 31905407093](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31905407093) 成功：`ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.2`，digest `sha256:3ef37c0cb272a609536fb6088e60e4c59b003be85d167436a3cfea6457388a33`，包含 amd64/arm64、SBOM 和 provenance；匿名 registry manifest 请求返回 200。
-- 非 Docker 服务器已部署：`/opt/freebuff2api/current -> /opt/freebuff2api/releases/80a4563`，旧版本 `/opt/freebuff2api/releases/003d2d8` 保留；备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260815T200547Z` 与对应环境文件。Node `v24.19.0`、systemd `freebuff2api.service`、管理层 `1.8.9-admin.2` 验证通过。
-- 服务器验收：健康 200、无 Key 的 `/v1/models` 返回 401、管理页 200、未登录管理 API 返回 401；管理员登录后系统显示严格代理开启、账号数 0。匿名授权任务真实走通 `201 -> pending -> cancelled`，没有登录真实账号或保存 Token。
+- 前一版非 Docker 部署记录：`/opt/freebuff2api/releases/80a4563`，更早版本 `/opt/freebuff2api/releases/003d2d8` 仍保留；`.2` 备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260815T200547Z` 与对应环境文件。
+- `.2` 部署时验收：健康 200、无 Key 的 `/v1/models` 返回 401、管理页 200、未登录管理 API 返回 401；匿名授权任务真实走通 `201 -> pending -> cancelled`，没有登录真实账号或保存 Token。
+- GitHub Actions 修复版分支构建 [Run 31924804026](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31924804026) 成功，对应提交 `501775a3319af698c58ad71f57e01eed83ccec3c`。
+- GitHub Actions 版本构建 [Run 31924881405](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31924881405) 成功：`ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.3`，digest `sha256:67f193ddc1fa896d1f49d660d5d6e3e343bd222a1149a71c04eb494b70be2611`，包含 amd64/arm64、SBOM 和 provenance；匿名 registry manifest 请求返回 200。
+- 非 Docker 服务器已升级：`/opt/freebuff2api/current -> /opt/freebuff2api/releases/501775a`，`/opt/freebuff2api/releases/80a4563` 保留供回滚；备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260816T034715Z` 与 `/var/backups/freebuff2api/freebuff2api.env.20260816T034715Z`。Node `v24.19.0`、systemd `freebuff2api.service`、管理层 `1.8.9-admin.3` 验证通过。
+- `.3` 服务器验收：健康端点 200、无 Key 的 `/v1/models` 返回 401、管理页 200、未登录管理 API 返回 401；实际加密库内有 2 个账号且均未配置代理，对其中一个执行脱敏回归返回 400 `ACCOUNT_PROXY_MISSING`。运行时可用账号仍为 0，因此公开健康状态显示 `critical` 是当前配置的预期结果。
 - 当前服务器管理端仍明文监听 `0.0.0.0:8788`，公网授权前必须改用 HTTPS 反向代理或 SSH 隧道；此前通过聊天暴露的服务器登录密码待轮换。
 - 没有使用真实 Freebuff 凭据做 session/chat 端到端测试；上游 `banned` 行为和额度仍未验证。
 
@@ -152,7 +156,7 @@ Node 管理侧：
 
 ## 10. 当前未完成事项
 
-- 功能分支尚未合并到 `main`；`v1.8.9-admin.2` 已发布并部署到非 Docker 服务器。
+- 功能分支尚未合并到 `main`；`v1.8.9-admin.3` 已发布并部署到非 Docker 服务器。
 - 未在本机实际构建 Docker 镜像（环境缺少 Docker CLI）。
 - 尚未用真实账号验证上游 session/chat/额度；也未承诺固定模型额度或解除封禁。
 - 未实现跨 Cloudflare isolate 的全局账号协调；当前 Worker 仍是 isolate-local 状态。
