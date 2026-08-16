@@ -170,7 +170,7 @@ Node 管理侧：
 
 ## 10. 当前未完成事项
 
-- 功能分支尚未合并到 `main`；`v1.8.9-admin.4` 已发布并部署到非 Docker 服务器，`v1.8.9-admin.3` 保留为回滚点。
+- 功能分支尚未合并到 `main`；`v1.8.9-admin.5` 已发布并部署到非 Docker 服务器，旧 `195d575` release 保留为回滚点。
 - 未在本机实际构建 Docker 镜像（环境缺少 Docker CLI）。
 - 尚未用真实账号验证上游 session/chat/额度；也未承诺固定模型额度或解除封禁。
 - 未实现跨 Cloudflare isolate 的全局账号协调；当前 Worker 仍是 isolate-local 状态。
