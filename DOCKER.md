@@ -20,7 +20,7 @@
 
 仓库不发布 `latest`。生产应固定版本标签、`sha-*` 标签，或进一步固定 Actions 输出的镜像 digest。
 
-当前推荐候选版本为 `1.8.9-admin.4`；不可变标签构建完成后会在这里补充 GitHub Actions Run 和多架构 digest。截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取：
+当前推荐版本为 `1.8.9-admin.4`，GitHub Actions Run `31926669376` 已成功；多架构镜像 digest 为 `sha256:3f99c7d38fde3eb06aaa831988031fe4ea51cde2c564911637e778e55814e73c`。截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取：
 
 ```bash
 docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.4

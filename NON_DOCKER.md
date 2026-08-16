@@ -60,6 +60,8 @@ ln -s /opt/freebuff2api/releases/<COMMIT> /opt/freebuff2api/current.next-<COMMIT
 mv -Tf /opt/freebuff2api/current.next-<COMMIT> /opt/freebuff2api/current
 ```
 
+如果先解压到 `mktemp -d` 再整体移动为 release，必须在切换前确认最终 release 根目录可被服务用户遍历，例如 `chmod 0755 /opt/freebuff2api/releases/<COMMIT>` 并执行 `runuser -u freebuff -- test -x /opt/freebuff2api/releases/<COMMIT>`。`mktemp -d` 默认的 `0700` 会导致 systemd 报 `status=200/CHDIR`。
+
 环境文件至少应包含随机生成且只保存在服务器上的值：
 
 ```dotenv

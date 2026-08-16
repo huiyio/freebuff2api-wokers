@@ -143,14 +143,18 @@ Node 管理侧：
 - 非 Docker 服务器已升级：`/opt/freebuff2api/current -> /opt/freebuff2api/releases/501775a`，`/opt/freebuff2api/releases/80a4563` 保留供回滚；备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260816T034715Z` 与 `/var/backups/freebuff2api/freebuff2api.env.20260816T034715Z`。Node `v24.19.0`、systemd `freebuff2api.service`、管理层 `1.8.9-admin.3` 验证通过。
 - `.3` 服务器验收：健康端点 200、无 Key 的 `/v1/models` 返回 401、管理页 200、未登录管理 API 返回 401；实际加密库内有 2 个账号且均未配置代理，对其中一个执行脱敏回归返回 400 `ACCOUNT_PROXY_MISSING`。运行时可用账号仍为 0，因此公开健康状态显示 `critical` 是当前配置的预期结果。
 - 按部署运营方选择，该服务器于 2026-08-16 将 `/etc/freebuff2api/freebuff2api.env` 的 `REQUIRE_ACCOUNT_PROXY` 从 `true` 改为 `false`，备份为 `/var/backups/freebuff2api/freebuff2api.env.20260816T035858Z-proxy-optional`。代码和 Docker 默认值仍保持严格模式；该服务器改为由每账号“代理必需”开关决定是否强制代理。当时 2 个账号均未勾选、未配置代理且未启用，服务重启日志已确认 `required=false`；本次没有自动启用或修改账号。
-- `1.8.9-admin.4` 修复无代理账号的测试按钮判定：服务端返回 `canTestConnection`，有代理时测试代理出口，无代理且全局与账号均允许直连时测试服务器直连；全局严格模式或账号级“代理必需”仍返回 `ACCOUNT_PROXY_MISSING`。旧 `/test-proxy` 路由保留兼容，管理页改用 `/test-connection`。本地语法检查和 74/74 测试已通过，发布与服务器切换待完成。
+- `1.8.9-admin.4` 修复无代理账号的测试按钮判定：服务端返回 `canTestConnection`，有代理时测试代理出口，无代理且全局与账号均允许直连时测试服务器直连；全局严格模式或账号级“代理必需”仍返回 `ACCOUNT_PROXY_MISSING`。旧 `/test-proxy` 路由保留兼容，管理页改用 `/test-connection`。本地语法检查、74/74 测试、Edge 桌面与 390px 移动端点击检查均通过。
+- GitHub Actions 分支构建 [Run 31926567462](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31926567462) 与版本构建 [Run 31926669376](https://github.com/huiyio/freebuff2api-wokers/actions/runs/31926669376) 均成功；`ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.4` 多架构 digest 为 `sha256:3f99c7d38fde3eb06aaa831988031fe4ea51cde2c564911637e778e55814e73c`，匿名 manifest 请求返回 200。
+- 非 Docker 服务器已升级：`/opt/freebuff2api/current -> /opt/freebuff2api/releases/195d575`，旧 `/opt/freebuff2api/releases/501775a` 保留供回滚；一致性数据库备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260816T043210Z`，配套环境备份为 `/var/backups/freebuff2api/freebuff2api.env.20260816T043210Z`。远端依赖安装、语法检查和 74/74 测试通过。
+- `.4` 服务器验收：systemd active/enabled，`REQUIRE_ACCOUNT_PROXY=false` 保持不变，本机与公网端点均为健康 200、无 Key models 401、管理页 200、未登录管理 API 401；加密库内 2 个账号均由后端判定为可测试直连，匿名固定目标直连探测返回 HTTP 200。没有读取、输出或发送真实账号 Token。
+- 首次 staging 使用 `mktemp -d` 后整体移动，release 根目录保留 `0700`，systemd 因 `status=200/CHDIR` 无法以 `freebuff` 用户进入；自动回滚到 `/501775a` 生效。将新 release 根目录修正为 `0755` 并用 `runuser -u freebuff` 验证后，原子切换成功。后续 staging 流程必须显式检查最终 release 的遍历权限。
 - 当前服务器管理端仍明文监听 `0.0.0.0:8788`，公网授权前必须改用 HTTPS 反向代理或 SSH 隧道；此前通过聊天暴露的服务器登录密码待轮换。
 - 没有使用真实 Freebuff 凭据做 session/chat 端到端测试；上游 `banned` 行为和额度仍未验证。
 
 ## 9. 后续操作顺序
 
 1. 为服务器管理端配置 HTTPS 反向代理或 SSH 隧道，并轮换此前暴露的服务器登录密码。
-2. 在管理页点击“授权账号”，完成自己的 Codebuff/Freebuff 登录；授权完成后为账号配置独立代理并启用。
+2. 在管理页点击“授权账号”，完成自己的 Codebuff/Freebuff 登录；授权完成后根据风险选择服务器直连或配置独立代理，再启用账号。
 3. 用一个专用、获授权的测试账号做一次真实 `/v1/models`、流式 chat 和非流式 chat；记录脱敏状态码，不把 Token 放入日志。
 4. 每次发布前检查 `git status --short`、`git diff --check`、敏感文件和 `package-lock.json`；给可部署提交打本地回退标签。
 5. 生产升级遵循 `UPSTREAM_SYNC.md`：先备份 SQLite 和 `ACCOUNT_STORE_KEY`，使用不可变镜像标签，保留旧镜像和回滚 Git 标签。
@@ -158,7 +162,7 @@ Node 管理侧：
 
 ## 10. 当前未完成事项
 
-- 功能分支尚未合并到 `main`；`v1.8.9-admin.3` 仍是当前已部署回滚点，`v1.8.9-admin.4` 正在发布与部署。
+- 功能分支尚未合并到 `main`；`v1.8.9-admin.4` 已发布并部署到非 Docker 服务器，`v1.8.9-admin.3` 保留为回滚点。
 - 未在本机实际构建 Docker 镜像（环境缺少 Docker CLI）。
 - 尚未用真实账号验证上游 session/chat/额度；也未承诺固定模型额度或解除封禁。
 - 未实现跨 Cloudflare isolate 的全局账号协调；当前 Worker 仍是 isolate-local 状态。
