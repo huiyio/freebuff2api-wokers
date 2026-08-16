@@ -60,7 +60,7 @@
 
         <div class="summary-strip" aria-label="账号摘要">
           <div><span>全部</span><strong id="metric-total">0</strong></div>
-          <div><span>已启用</span><strong id="metric-enabled">0</strong></div>
+          <div><span>运行池</span><strong id="metric-enabled">0</strong></div>
           <div><span>连接正常</span><strong id="metric-proxy-ok">0</strong></div>
           <div><span>异常</span><strong id="metric-errors">0</strong></div>
         </div>
@@ -74,7 +74,8 @@
             <span class="sr-only">状态筛选</span>
             <select id="account-filter">
               <option value="all">全部状态</option>
-              <option value="enabled">已启用</option>
+              <option value="enabled">运行中</option>
+              <option value="paused">限流暂停</option>
               <option value="disabled">已停用</option>
               <option value="error">异常</option>
             </select>

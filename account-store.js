@@ -5,6 +5,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { maskProxyUrl, proxyProtocol } from './credential-vault.js';
 
 const VAULT_SENTINEL = 'freebuff-account-store-v1';
+const LATEST_SCHEMA_VERSION = 2;
+const DEFAULT_RECOVERY_INTERVAL_MS = 5 * 60 * 1000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -17,6 +19,27 @@ function asBoolean(value) {
 function truncate(value, max = 240) {
   const text = String(value || '');
   return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
+}
+
+function timestamp(value, fallback = nowIso()) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(parsed.getTime())) throw new TypeError('invalid timestamp');
+  return parsed.toISOString();
+}
+
+function positiveInteger(value, fallback, name) {
+  const parsed = value === undefined ? fallback : Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new TypeError(`${name} must be a positive integer`);
+  return parsed;
+}
+
+function leaseOwner(value) {
+  const owner = String(value || '').trim();
+  if (!owner || owner.length > 128 || /[\r\n\0]/.test(owner)) {
+    throw new TypeError('recovery lease owner is invalid');
+  }
+  return owner;
 }
 
 export class AccountStore {
@@ -39,11 +62,20 @@ export class AccountStore {
   }
 
   #migrate() {
-    const version = this.db.prepare('PRAGMA user_version').get().user_version;
-    if (version > 1) throw new Error(`database schema version ${version} is newer than this application supports`);
-    if (version === 0) {
-      const sql = readFileSync(new URL('./migrations/001_initial.sql', import.meta.url), 'utf8');
+    const version = Number(this.db.prepare('PRAGMA user_version').get().user_version);
+    if (version > LATEST_SCHEMA_VERSION) {
+      throw new Error(`database schema version ${version} is newer than this application supports`);
+    }
+    const migrations = [
+      null,
+      '001_initial.sql',
+      '002_account_auto_pause.sql',
+    ];
+    for (let next = version + 1; next <= LATEST_SCHEMA_VERSION; next += 1) {
+      const sql = readFileSync(new URL(`./migrations/${migrations[next]}`, import.meta.url), 'utf8');
       this.transaction(() => this.db.exec(sql));
+      const applied = Number(this.db.prepare('PRAGMA user_version').get().user_version);
+      if (applied !== next) throw new Error(`database migration ${next} did not set the expected schema version`);
     }
   }
 
@@ -99,11 +131,23 @@ export class AccountStore {
 
   #rowToAccount(row, includeSecrets = false) {
     if (!row) return null;
+    const enabled = asBoolean(row.enabled);
+    const autoPauseReason = row.auto_pause_reason || null;
     const account = {
       id: row.id,
       name: row.name,
       email: row.email,
-      enabled: asBoolean(row.enabled),
+      enabled,
+      effectiveEnabled: enabled && !autoPauseReason,
+      autoPaused: Boolean(autoPauseReason),
+      autoPauseReason,
+      autoPausedAt: row.auto_paused_at || null,
+      nextRecoveryProbeAt: row.next_recovery_probe_at || null,
+      lastRecoveryProbeAt: row.last_recovery_probe_at || null,
+      lastRecoveryState: row.last_recovery_state || null,
+      lastRecoveryMessage: row.last_recovery_message || null,
+      recoveryAttempts: Number(row.recovery_attempts || 0),
+      stateRevision: Number(row.state_revision || 0),
       proxyRequired: asBoolean(row.proxy_required),
       hasProxy: Boolean(row.proxy_url_cipher),
       proxyUrlMasked: null,
@@ -153,8 +197,11 @@ export class AccountStore {
       INSERT INTO accounts (
         id, name, email, auth_token_cipher, token_fingerprint, proxy_url_cipher,
         proxy_required, enabled, created_at, updated_at,
-        last_proxy_status, last_proxy_http_status, last_proxy_message, last_proxy_test_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        last_proxy_status, last_proxy_http_status, last_proxy_message, last_proxy_test_at,
+        auto_pause_reason, auto_paused_at, next_recovery_probe_at,
+        last_recovery_probe_at, last_recovery_state, last_recovery_message,
+        recovery_attempts, state_revision, recovery_lease_owner, recovery_lease_until
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       input.name,
@@ -170,6 +217,16 @@ export class AccountStore {
       input.lastProxyHttpStatus || null,
       input.lastProxyMessage || null,
       input.lastProxyTestAt || null,
+      input.autoPauseReason || null,
+      input.autoPausedAt || null,
+      input.nextRecoveryProbeAt || null,
+      input.lastRecoveryProbeAt || null,
+      input.lastRecoveryState || null,
+      input.lastRecoveryMessage || null,
+      Math.max(0, Number(input.recoveryAttempts) || 0),
+      Math.max(0, Number(input.stateRevision) || 0),
+      input.recoveryLeaseOwner || null,
+      input.recoveryLeaseUntil || null,
     );
     return this.getAccount(id, { includeSecrets: true });
   }
@@ -177,8 +234,39 @@ export class AccountStore {
   replaceAccount(input) {
     const existing = this.getAccount(input.id, { includeSecrets: true });
     if (!existing) throw new Error('account not found');
+    const enabledChanged = Boolean(input.enabled) !== existing.enabled;
+    const routeChanged = input.authToken !== existing.authToken
+      || (input.proxyUrl || null) !== (existing.proxyUrl || null)
+      || Boolean(input.proxyRequired) !== existing.proxyRequired;
+    const preserveAutoPause = !enabledChanged && !routeChanged;
+    const recoveryState = preserveAutoPause
+      ? {
+          autoPauseReason: existing.autoPauseReason,
+          autoPausedAt: existing.autoPausedAt,
+          nextRecoveryProbeAt: existing.nextRecoveryProbeAt,
+          lastRecoveryProbeAt: existing.lastRecoveryProbeAt,
+          lastRecoveryState: existing.lastRecoveryState,
+          lastRecoveryMessage: existing.lastRecoveryMessage,
+          recoveryAttempts: existing.recoveryAttempts,
+        }
+      : {
+          autoPauseReason: null,
+          autoPausedAt: null,
+          nextRecoveryProbeAt: null,
+          lastRecoveryProbeAt: existing.lastRecoveryProbeAt,
+          lastRecoveryState: existing.lastRecoveryState,
+          lastRecoveryMessage: existing.lastRecoveryMessage,
+          recoveryAttempts: 0,
+        };
     this.deleteAccount(input.id);
-    return this.createAccount({ ...input, createdAt: input.createdAt || existing.createdAt });
+    return this.createAccount({
+      ...input,
+      ...recoveryState,
+      createdAt: input.createdAt || existing.createdAt,
+      stateRevision: existing.stateRevision + 1,
+      recoveryLeaseOwner: null,
+      recoveryLeaseUntil: null,
+    });
   }
 
   deleteAccount(id) {
@@ -205,6 +293,170 @@ export class AccountStore {
 
   setProxyTest(id, result) {
     return this.setConnectionTest(id, result);
+  }
+
+  pauseAccountForRateLimit(id, {
+    observedAt,
+    nextProbeAt,
+    message = 'Freebuff rate limited this account',
+  } = {}) {
+    const pausedAt = timestamp(observedAt);
+    const nextAt = timestamp(nextProbeAt, new Date(Date.parse(pausedAt) + DEFAULT_RECOVERY_INTERVAL_MS).toISOString());
+    const result = this.db.prepare(`
+      UPDATE accounts
+      SET auto_paused_at = ?,
+          next_recovery_probe_at = ?,
+          recovery_attempts = 0,
+          auto_pause_reason = 'rate_limited',
+          last_recovery_state = 'rate_limited',
+          last_recovery_message = ?,
+          recovery_lease_owner = NULL,
+          recovery_lease_until = NULL,
+          state_revision = state_revision + 1,
+          updated_at = ?
+      WHERE id = ? AND enabled = 1 AND auto_pause_reason IS NULL
+    `).run(pausedAt, nextAt, truncate(message), pausedAt, id);
+    return { changed: result.changes > 0, account: this.getAccount(id) };
+  }
+
+  claimDueRecoveryProbes(now, owner, leaseMs = 60000, limit = 1) {
+    const claimedAt = timestamp(now);
+    const claimedBy = leaseOwner(owner);
+    const safeLeaseMs = positiveInteger(leaseMs, 60000, 'recovery lease duration');
+    const safeLimit = Math.max(1, Math.min(50, positiveInteger(limit, 1, 'recovery probe limit')));
+    const leaseUntil = new Date(Date.parse(claimedAt) + safeLeaseMs).toISOString();
+
+    return this.transaction(() => {
+      const due = this.db.prepare(`
+        SELECT id
+        FROM accounts
+        WHERE enabled = 1
+          AND auto_pause_reason = 'rate_limited'
+          AND next_recovery_probe_at IS NOT NULL
+          AND next_recovery_probe_at <= ?
+          AND (recovery_lease_until IS NULL OR recovery_lease_until <= ?)
+        ORDER BY next_recovery_probe_at, id
+        LIMIT ?
+      `).all(claimedAt, claimedAt, safeLimit);
+      const claimed = [];
+      const claim = this.db.prepare(`
+        UPDATE accounts
+        SET recovery_lease_owner = ?, recovery_lease_until = ?,
+            last_recovery_probe_at = ?, last_recovery_state = 'probing',
+            last_recovery_message = NULL,
+            recovery_attempts = recovery_attempts + 1,
+            state_revision = state_revision + 1,
+            updated_at = ?
+        WHERE id = ?
+          AND enabled = 1
+          AND auto_pause_reason = 'rate_limited'
+          AND next_recovery_probe_at IS NOT NULL
+          AND next_recovery_probe_at <= ?
+          AND (recovery_lease_until IS NULL OR recovery_lease_until <= ?)
+      `);
+      for (const row of due) {
+        const result = claim.run(
+          claimedBy,
+          leaseUntil,
+          claimedAt,
+          claimedAt,
+          row.id,
+          claimedAt,
+          claimedAt,
+        );
+        if (result.changes === 0) continue;
+        claimed.push({
+          ...this.getAccount(row.id, { includeSecrets: true }),
+          recoveryLeaseOwner: claimedBy,
+          recoveryLeaseUntil: leaseUntil,
+        });
+      }
+      return claimed;
+    });
+  }
+
+  finishRecoveryProbe(id, {
+    owner,
+    revision,
+    state,
+    nextProbeAt,
+    recovered = false,
+    message = '',
+    checkedAt,
+  } = {}) {
+    const checked = timestamp(checkedAt);
+    const claimedBy = leaseOwner(owner);
+    const expectedRevision = Number(revision);
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new TypeError('recovery state revision is invalid');
+    }
+    const nextState = truncate(state || (recovered ? 'recovered' : 'rate_limited'), 80);
+    let result;
+    if (recovered) {
+      result = this.db.prepare(`
+        UPDATE accounts
+        SET auto_pause_reason = NULL, auto_paused_at = NULL,
+            next_recovery_probe_at = NULL,
+            last_recovery_probe_at = ?, last_recovery_state = ?, last_recovery_message = ?,
+            recovery_lease_owner = NULL, recovery_lease_until = NULL,
+            state_revision = state_revision + 1, updated_at = ?
+        WHERE id = ? AND enabled = 1
+          AND auto_pause_reason = 'rate_limited'
+          AND state_revision = ? AND recovery_lease_owner = ?
+      `).run(checked, nextState, truncate(message), checked, id, expectedRevision, claimedBy);
+    } else {
+      const nextAt = timestamp(nextProbeAt, new Date(Date.parse(checked) + DEFAULT_RECOVERY_INTERVAL_MS).toISOString());
+      result = this.db.prepare(`
+        UPDATE accounts
+        SET next_recovery_probe_at = ?,
+            last_recovery_probe_at = ?, last_recovery_state = ?, last_recovery_message = ?,
+            recovery_lease_owner = NULL, recovery_lease_until = NULL,
+            state_revision = state_revision + 1, updated_at = ?
+        WHERE id = ? AND enabled = 1
+          AND auto_pause_reason = 'rate_limited'
+          AND state_revision = ? AND recovery_lease_owner = ?
+      `).run(nextAt, checked, nextState, truncate(message), checked, id, expectedRevision, claimedBy);
+    }
+    return { changed: result.changes > 0, account: this.getAccount(id) };
+  }
+
+  completeRecoveryProbe(id, input = {}) {
+    return this.finishRecoveryProbe(id, { ...input, recovered: true });
+  }
+
+  keepRecoveryPaused(id, input = {}) {
+    return this.finishRecoveryProbe(id, { ...input, recovered: false });
+  }
+
+  clearAutoPause(id, { state = 'cleared', message = '', checkedAt } = {}) {
+    const changedAt = timestamp(checkedAt);
+    const result = this.db.prepare(`
+      UPDATE accounts
+      SET auto_pause_reason = NULL, auto_paused_at = NULL,
+          next_recovery_probe_at = NULL,
+          last_recovery_state = ?, last_recovery_message = ?,
+          recovery_attempts = 0,
+          recovery_lease_owner = NULL, recovery_lease_until = NULL,
+          state_revision = state_revision + 1, updated_at = ?
+      WHERE id = ? AND (
+        auto_pause_reason IS NOT NULL
+        OR recovery_lease_owner IS NOT NULL
+        OR next_recovery_probe_at IS NOT NULL
+      )
+    `).run(truncate(state, 80), truncate(message), changedAt, id);
+    return { changed: result.changes > 0, account: this.getAccount(id) };
+  }
+
+  cancelAutoPause(id, options = {}) {
+    return this.clearAutoPause(id, { state: 'cancelled', ...options });
+  }
+
+  clearAutoPauseOnManualEnable(id, options = {}) {
+    return this.clearAutoPause(id, { state: 'manual_enabled', ...options });
+  }
+
+  clearAutoPauseOnManualDisable(id, options = {}) {
+    return this.clearAutoPause(id, { state: 'manual_disabled', ...options });
   }
 
   appendAudit({ actor = 'admin', action, accountId = null, summary }) {

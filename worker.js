@@ -440,6 +440,17 @@ const sessionCreationTails = new Map();
 const ACCOUNT_SCOPE_SEPARATOR = "\u0000";
 const DEFAULT_ACCOUNT_GENERATION = "static";
 let activeAccountGeneration = DEFAULT_ACCOUNT_GENERATION;
+let accountObservationSink = null;
+
+function isNodeRuntime() {
+  return typeof process !== "undefined" && Boolean(process?.versions?.node);
+}
+
+// The Node admin host can subscribe to selected account observations. Cloudflare
+// requests leave this unset, so the Worker has no external observation side effect.
+export function setAccountObservationSink(sink) {
+  accountObservationSink = isNodeRuntime() && typeof sink === "function" ? sink : null;
+}
 
 function normalizeAccountGeneration(value) {
   const generation = String(value ?? DEFAULT_ACCOUNT_GENERATION).trim();
@@ -581,9 +592,17 @@ function recordAccountObservation(token, status, dataOrText, extra = {}, generat
   if (typeof dataOrText === "string") {
     try { data = JSON.parse(dataOrText); } catch { data = null; }
   }
-  const upstreamState = data && typeof data === "object" ? data.status || data.state : null;
+  const upstreamStatus = data && typeof data === "object" && typeof data.status === "string"
+    ? data.status
+    : null;
+  const upstreamStateValue = data && typeof data === "object" && typeof data.state === "string"
+    ? data.state
+    : null;
+  const upstreamState = upstreamStatus || upstreamStateValue;
+  const reportsRateLimit = upstreamStatus === "rate_limited" || upstreamStateValue === "rate_limited";
   let state = null;
   if (status === 404) state = "ok";
+  else if (status === 429 || reportsRateLimit) state = "rate_limited";
   else if (["banned", "country_blocked", "rate_limited", "model_locked", "ip_capped"].includes(upstreamState)) state = upstreamState;
   else if (status >= 200 && status < 300) state = "ok";
   else if (status === 401) state = "token_invalid";
@@ -591,11 +610,12 @@ function recordAccountObservation(token, status, dataOrText, extra = {}, generat
     state = upstreamState === "banned"
       ? "banned"
       : upstreamState === "country_blocked" ? "country_blocked" : "blocked";
-  } else if (status === 429) state = "rate_limited";
+  }
   if (!state) return;
 
   const key = scopedAccountKey(token, generation);
   const previous = acctHealth.get(key) || {};
+  const retryAfterMs = typeof extra.retryAfterMs === "number" ? extra.retryAfterMs : previous.retryAfterMs || null;
   acctHealth.set(key, {
     ...previous,
     ...extra,
@@ -603,9 +623,21 @@ function recordAccountObservation(token, status, dataOrText, extra = {}, generat
     state,
     uid: extra.uid || previous.uid || null,
     quota: extra.quota || previous.quota || null,
-    retryAfterMs: typeof extra.retryAfterMs === "number" ? extra.retryAfterMs : previous.retryAfterMs || null,
+    retryAfterMs,
     checkedAt: Date.now(),
   });
+  if (state === "rate_limited" && isCurrentAccountGeneration(generation) && accountObservationSink) {
+    try {
+      const emitted = accountObservationSink({
+        token,
+        generation: normalizeAccountGeneration(generation),
+        state,
+        httpStatus: Number.isInteger(status) ? status : null,
+        retryAfterMs: Number.isFinite(retryAfterMs) && retryAfterMs >= 0 ? retryAfterMs : null,
+      });
+      Promise.resolve(emitted).catch(() => {});
+    } catch {}
+  }
 }
 
 function summarizeAccountHealth(pool, health) {

@@ -453,3 +453,117 @@ test('allows connection checks on enabled accounts but keeps real model tests is
     await fixture.close();
   }
 });
+
+test('removes only a rate-limited account from the runtime pool and restores it after a proxy-bound recovery check', async () => {
+  const fixture = await managerFixture([], { requireProxy: true });
+  try {
+    const first = await fixture.service.create({
+      name: 'Limited account',
+      authToken: 'rate-limited-managed-token-12345',
+      proxyUrl: 'http://user:password@127.0.0.1:18080',
+      proxyRequired: true,
+      enabled: true,
+    });
+    const second = await fixture.service.create({
+      name: 'Healthy account',
+      authToken: 'healthy-managed-token-12345',
+      proxyUrl: 'http://user:password@127.0.0.1:18081',
+      proxyRequired: true,
+      enabled: true,
+    });
+    const generation = fixture.runtime.snapshot.generation;
+
+    const stale = await fixture.service.observeRateLimit({
+      token: 'rate-limited-managed-token-12345',
+      generation: String(generation - 1),
+    });
+    assert.equal(stale.changed, false);
+    assert.equal(fixture.runtime.tokenString.includes('rate-limited-managed-token-12345'), true);
+
+    const paused = await fixture.service.observeRateLimit({
+      token: 'rate-limited-managed-token-12345',
+      generation: String(generation),
+      retryAfterMs: 1000,
+    });
+    assert.equal(paused.changed, true);
+    assert.equal(fixture.runtime.tokenString, 'healthy-managed-token-12345');
+    const limited = fixture.store.getAccount(first.id);
+    assert.equal(limited.enabled, true);
+    assert.equal(limited.effectiveEnabled, false);
+    assert.equal(limited.autoPaused, true);
+    assert.equal(limited.autoPauseReason, 'rate_limited');
+    assert.ok(Date.parse(limited.nextRecoveryProbeAt) >= Date.now() + (4 * 60 * 1000));
+    assert.equal(fixture.store.getAccount(second.id).effectiveEnabled, true);
+    assert.equal((await fixture.service.observeRateLimit({
+      token: 'rate-limited-managed-token-12345',
+      generation: String(generation),
+    })).changed, false, 'duplicate Worker observations are idempotent');
+
+    fixture.service.recoveryProbe = async (route, options) => {
+      assert.equal(route.token, 'rate-limited-managed-token-12345');
+      assert.ok(route.proxy, 'the recovery probe must retain this account proxy');
+      assert.equal(options.requireProxy, true);
+      return { recovered: true, state: 'recovered', message: 'Freebuff accepted the account' };
+    };
+    const outcomes = await fixture.service.runRecoveryProbes({
+      owner: 'manager-recovery-test',
+      now: new Date(Date.parse(limited.nextRecoveryProbeAt) + 1),
+    });
+    assert.deepEqual(outcomes, [{
+      accountId: first.id,
+      changed: true,
+      recovered: true,
+      state: 'recovered',
+    }]);
+    assert.equal(fixture.store.getAccount(first.id).effectiveEnabled, true);
+    assert.match(fixture.runtime.tokenString, /rate-limited-managed-token-12345/);
+    assert.match(fixture.runtime.tokenString, /healthy-managed-token-12345/);
+    assert.doesNotMatch(JSON.stringify(fixture.store.listAudit()), /rate-limited-managed-token-12345|password/);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('a manual disable wins over an in-flight automatic recovery result', async () => {
+  const fixture = await managerFixture([], { requireProxy: false });
+  try {
+    const account = await fixture.service.create({
+      name: 'Manual override account',
+      authToken: 'manual-override-managed-token-12345',
+      proxyRequired: false,
+      enabled: true,
+    });
+    await fixture.service.observeRateLimit({
+      token: 'manual-override-managed-token-12345',
+      generation: String(fixture.runtime.snapshot.generation),
+    });
+    const paused = fixture.store.getAccount(account.id);
+    let startProbe;
+    const started = new Promise((resolve) => { startProbe = resolve; });
+    let finishProbe;
+    const result = new Promise((resolve) => { finishProbe = resolve; });
+    fixture.service.recoveryProbe = async () => {
+      startProbe();
+      return result;
+    };
+
+    const recovering = fixture.service.runRecoveryProbes({
+      owner: 'manual-override-test',
+      now: new Date(Date.parse(paused.nextRecoveryProbeAt) + 1),
+    });
+    await started;
+    await fixture.service.update(account.id, { enabled: false });
+    finishProbe({ recovered: true, state: 'recovered', message: 'Freebuff accepted the account' });
+    const [outcome] = await recovering;
+
+    assert.equal(outcome.changed, false);
+    assert.equal(outcome.recovered, false);
+    const after = fixture.store.getAccount(account.id);
+    assert.equal(after.enabled, false);
+    assert.equal(after.autoPaused, false);
+    assert.equal(after.effectiveEnabled, false);
+    assert.equal(fixture.runtime.tokenString, '');
+  } finally {
+    await fixture.close();
+  }
+});

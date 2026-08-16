@@ -157,3 +157,205 @@ test('encrypts API key settings and restores them after reopening the database',
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('migrates a v1 account database to v2 automatic recovery fields', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'freebuff-account-store-migration-'));
+  const databasePath = join(directory, 'accounts.sqlite');
+  const v1Sql = await readFile(new URL('../migrations/001_initial.sql', import.meta.url), 'utf8');
+  const vault = createCredentialVault('71'.repeat(32));
+  const accountId = 'legacy-account-id';
+  const authToken = 'legacy-account-token-12345:legacy-user';
+  const proxyUrl = 'socks5://legacy-user:legacy-password@127.0.0.1:1080';
+  const raw = new DatabaseSync(databasePath);
+  raw.exec(v1Sql);
+  raw.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)').run(
+    'vault_check',
+    vault.encrypt('freebuff-account-store-v1', 'settings:vault_check'),
+    '2026-08-16T00:00:00.000Z',
+  );
+  raw.prepare(`
+    INSERT INTO accounts (
+      id, name, email, auth_token_cipher, token_fingerprint, proxy_url_cipher,
+      proxy_required, enabled, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    accountId,
+    'Legacy encrypted account',
+    'legacy@example.com',
+    vault.encrypt(authToken, `account:${accountId}:authToken`),
+    vault.fingerprint('freebuff-token', 'legacy-account-token-12345'),
+    vault.encrypt(proxyUrl, `account:${accountId}:proxyUrl`),
+    1,
+    1,
+    '2026-08-16T00:00:00.000Z',
+    '2026-08-16T00:00:00.000Z',
+  );
+  raw.close();
+
+  const store = new AccountStore({
+    databasePath,
+    vault,
+  });
+  try {
+    assert.equal(store.db.prepare('PRAGMA user_version').get().user_version, 2);
+    const columns = store.db.prepare("PRAGMA table_info('accounts')").all().map((column) => column.name);
+    for (const column of [
+      'auto_pause_reason',
+      'auto_paused_at',
+      'next_recovery_probe_at',
+      'last_recovery_probe_at',
+      'last_recovery_state',
+      'recovery_attempts',
+      'state_revision',
+    ]) {
+      assert.ok(columns.includes(column), `missing migrated column ${column}`);
+    }
+    const restored = store.getAccount(accountId, { includeSecrets: true });
+    assert.equal(restored.authToken, authToken);
+    assert.equal(restored.proxyUrl, proxyUrl);
+    assert.equal(restored.effectiveEnabled, true);
+    assert.equal(restored.autoPaused, false);
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('persists rate-limit pauses, leases one recovery probe, and resumes only with the claimed revision', async () => {
+  await withStore(async ({ store }) => {
+    const created = store.createAccount({
+      name: 'Recoverable account',
+      authToken: 'recoverable-account-token-12345',
+      token: 'recoverable-account-token-12345',
+      proxyUrl: null,
+      proxyRequired: false,
+      enabled: true,
+    });
+    const pausedAt = '2026-08-16T00:00:00.000Z';
+    const firstProbeAt = '2026-08-16T00:05:00.000Z';
+    const paused = store.pauseAccountForRateLimit(created.id, {
+      observedAt: pausedAt,
+      nextProbeAt: firstProbeAt,
+      message: 'upstream returned 429',
+    });
+
+    assert.equal(paused.changed, true);
+    assert.equal(paused.account.enabled, true);
+    assert.equal(paused.account.effectiveEnabled, false);
+    assert.equal(paused.account.autoPaused, true);
+    assert.equal(paused.account.autoPauseReason, 'rate_limited');
+    assert.equal(paused.account.nextRecoveryProbeAt, firstProbeAt);
+    const duplicatePause = store.pauseAccountForRateLimit(created.id, {
+      observedAt: '2026-08-16T00:00:01.000Z',
+      nextProbeAt: '2026-08-16T00:10:00.000Z',
+    });
+    assert.equal(duplicatePause.changed, false);
+    assert.equal(duplicatePause.account.stateRevision, paused.account.stateRevision);
+    assert.equal(duplicatePause.account.nextRecoveryProbeAt, firstProbeAt);
+    assert.equal(store.claimDueRecoveryProbes('2026-08-16T00:04:59.000Z', 'monitor-a').length, 0);
+
+    const [firstClaim] = store.claimDueRecoveryProbes(firstProbeAt, 'monitor-a', 60000);
+    assert.ok(firstClaim);
+    assert.equal(firstClaim.authToken, 'recoverable-account-token-12345');
+    assert.equal(firstClaim.recoveryAttempts, 1);
+    assert.equal(firstClaim.lastRecoveryState, 'probing');
+    assert.equal(store.claimDueRecoveryProbes(firstProbeAt, 'monitor-b', 60000).length, 0);
+
+    const stale = store.keepRecoveryPaused(created.id, {
+      owner: 'monitor-a',
+      revision: firstClaim.stateRevision - 1,
+      state: 'rate_limited',
+      nextProbeAt: '2026-08-16T00:10:00.000Z',
+    });
+    assert.equal(stale.changed, false);
+    assert.equal(stale.account.autoPaused, true);
+
+    const secondProbeAt = '2026-08-16T00:10:00.000Z';
+    const kept = store.keepRecoveryPaused(created.id, {
+      owner: 'monitor-a',
+      revision: firstClaim.stateRevision,
+      state: 'rate_limited',
+      nextProbeAt: secondProbeAt,
+      message: 'still limited',
+    });
+    assert.equal(kept.changed, true);
+    assert.equal(kept.account.nextRecoveryProbeAt, secondProbeAt);
+    assert.equal(kept.account.lastRecoveryState, 'rate_limited');
+
+    const [secondClaim] = store.claimDueRecoveryProbes(secondProbeAt, 'monitor-a', 60000);
+    assert.ok(secondClaim);
+    const resumed = store.completeRecoveryProbe(created.id, {
+      owner: 'monitor-a',
+      revision: secondClaim.stateRevision,
+      state: 'ok',
+      message: 'read-only recovery probe passed',
+    });
+    assert.equal(resumed.changed, true);
+    assert.equal(resumed.account.enabled, true);
+    assert.equal(resumed.account.effectiveEnabled, true);
+    assert.equal(resumed.account.autoPaused, false);
+    assert.equal(resumed.account.autoPauseReason, null);
+    assert.equal(resumed.account.nextRecoveryProbeAt, null);
+  });
+});
+
+test('manual state changes invalidate a recovery claim and account edits preserve or clear automatic pauses deliberately', async () => {
+  await withStore(async ({ store }) => {
+    const token = 'replacement-account-token-12345';
+    const created = store.createAccount({
+      name: 'Replacement account',
+      authToken: token,
+      token,
+      proxyUrl: null,
+      proxyRequired: false,
+      enabled: true,
+    });
+    store.pauseAccountForRateLimit(created.id, {
+      observedAt: '2026-08-16T01:00:00.000Z',
+      nextProbeAt: '2026-08-16T01:05:00.000Z',
+    });
+
+    const paused = store.getAccount(created.id, { includeSecrets: true });
+    const renamed = store.replaceAccount({
+      id: paused.id,
+      name: 'Renamed account',
+      email: paused.email,
+      authToken: paused.authToken,
+      token,
+      proxyUrl: paused.proxyUrl,
+      proxyRequired: paused.proxyRequired,
+      enabled: paused.enabled,
+      createdAt: paused.createdAt,
+      updatedAt: '2026-08-16T01:01:00.000Z',
+    });
+    assert.equal(renamed.autoPauseReason, 'rate_limited');
+    assert.equal(renamed.effectiveEnabled, false);
+    assert.ok(renamed.stateRevision > paused.stateRevision);
+
+    const [claim] = store.claimDueRecoveryProbes('2026-08-16T01:05:00.000Z', 'monitor-a', 60000);
+    assert.ok(claim);
+    const manuallyDisabled = store.replaceAccount({
+      id: claim.id,
+      name: claim.name,
+      email: claim.email,
+      authToken: claim.authToken,
+      token,
+      proxyUrl: claim.proxyUrl,
+      proxyRequired: claim.proxyRequired,
+      enabled: false,
+      createdAt: claim.createdAt,
+      updatedAt: '2026-08-16T01:05:01.000Z',
+    });
+    assert.equal(manuallyDisabled.enabled, false);
+    assert.equal(manuallyDisabled.autoPaused, false);
+    assert.equal(manuallyDisabled.effectiveEnabled, false);
+
+    const staleCompletion = store.completeRecoveryProbe(claim.id, {
+      owner: 'monitor-a',
+      revision: claim.stateRevision,
+      state: 'ok',
+    });
+    assert.equal(staleCompletion.changed, false);
+    assert.equal(staleCompletion.account.enabled, false);
+  });
+});

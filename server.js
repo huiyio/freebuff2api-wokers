@@ -18,6 +18,7 @@ import {
   AccountServiceError,
   importLegacyCredentials,
 } from './account-manager.js';
+import { AccountRecoveryMonitor } from './account-recovery-monitor.js';
 import { AccountStore } from './account-store.js';
 import { initializeAdminAuth } from './admin-auth.js';
 import { createAdminHandler } from './admin-server.js';
@@ -117,6 +118,7 @@ let accountStore = null;
 let accountService = null;
 let adminAuth = null;
 let freebuffAuthorizer = null;
+let accountRecoveryMonitor = null;
 
 if (adminEnabled) {
   const vault = createCredentialVault(secretValue('ACCOUNT_STORE_KEY'));
@@ -184,6 +186,7 @@ if (accountStore) {
       upstreamBaseUrl: process.env.CODEBUFF_API || undefined,
     }),
     modelCatalog: listTestModels,
+    upstreamBaseUrl: process.env.CODEBUFF_API || undefined,
   });
   freebuffAuthorizer = new FreebuffAuthorizer({ accountService });
 }
@@ -208,6 +211,18 @@ function workerEnvironment(snapshot) {
 runtime.setAccountStateInvalidator((tokens, activeTokenString, activeGeneration) => {
   workerHandler.invalidateAccountState?.(tokens, activeTokenString, activeGeneration);
 });
+if (accountService) {
+  worker.setAccountObservationSink?.((event) => {
+    void accountService.observeRateLimit(event).catch((error) => {
+      console.error('[recovery] could not persist rate-limit pause:', error?.message || 'unknown error');
+    });
+  });
+  accountRecoveryMonitor = new AccountRecoveryMonitor({
+    accountService,
+    onError: (error) => console.error('[recovery] scheduled probe failed:', error?.message || 'unknown error'),
+  });
+  accountRecoveryMonitor.start();
+}
 
 const stats = runtime.snapshot.stats;
 console.log(`[server] start: ${runtime.snapshot.tokenLines.length} accounts, apiKey=set, debug=${workerEnv.FREEBUFF_DEBUG}`);
@@ -302,6 +317,7 @@ if (adminEnabled) {
         requireProxy: requireAccountProxy,
         accountCount: accountStore.countAccounts(),
         enabledAccountCount: runtime.snapshot.managedAccountIds.length,
+        autoPausedAccountCount: accountStore.listAccounts().filter((account) => account.autoPaused).length,
         proxyKinds: current.proxyKinds,
       };
     },
@@ -412,7 +428,10 @@ async function shutdown(signal) {
   const forceExit = setTimeout(() => process.exit(1), 10000);
   forceExit.unref();
   await Promise.allSettled([closeServer(publicServer), closeServer(adminServer)]);
-  await Promise.allSettled([freebuffAuthorizer?.cancelAll?.()]);
+  await Promise.allSettled([
+    freebuffAuthorizer?.cancelAll?.(),
+    accountRecoveryMonitor?.stop?.(),
+  ]);
   await runtime.close();
   accountStore?.close();
   clearTimeout(forceExit);

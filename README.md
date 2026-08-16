@@ -96,12 +96,16 @@ curl https://你的worker.workers.dev/healthz
 
 授权完成的账号始终先以**停用**状态保存，确认配置后再启用；严格代理模式下还必须先填写 HTTP/HTTPS/SOCKS5 代理，账号才可进入请求池。即使没有代理，账号页的外层“代理测试”和“模型测试”仍可点击，以便显示明确的配置状态；代理测试会返回 `ACCOUNT_PROXY_MISSING`，而严格模式下模型测试会打开选择框但阻止提交，并提示先配置代理。启用操作仍要求满足严格代理规则。若全局与账号都允许直连，已停用账号的模型测试可以直连运行，但代理测试始终要求已配置代理。授权任务状态包含“生成中、等待授权、保存中、已完成/已取消/已过期”；取消、登出或会话失效会终止未完成任务。授权链接有效期很短，只能由当前管理员会话查看；请不要截图、转发或在明文 HTTP 管理端使用。公网管理端应先配置 HTTPS。
 
+### 自动限流恢复
+
+仅管理模式会在真实 session 或模型请求明确返回 HTTP `429` 或 `status=rate_limited` 时，立即把对应账号从运行池移除，同时保留管理员的“启用”意愿。状态、下次检查时间和探测结果会与加密账号凭据一同持久化在 SQLite 中，因此服务重启不会重新放入该账号。后台默认每 5 分钟通过该账号自己的代理发起一次只读 `GET /api/v1/freebuff/session`（不创建 session、不请求模型）；若上游给出更长的 `Retry-After`，会尊重该等待时间。只有 Freebuff 明确接受账号（`2xx` 或“无活跃 session”的 `404`）才会自动恢复；`429`、网络/代理故障、`5xx`、Token 无效、封禁或地区限制都会保持暂停并且绝不改为启用。管理员手动停用、修改 Token 或修改代理会取消该恢复任务，已在途的旧探测不能把账号重新启用。上游对该只读检查的额度语义仍以 Freebuff 实际响应为准。
+
 ### 管理端测试：代理与模型分开
 
 账号页提供两个不同用途的按钮，结果不能互相替代：
 
 - **代理测试**只验证网络路径，不使用账号 Token，也不会创建 Freebuff session。它先通过该账号的 HTTP/HTTPS/SOCKS5 代理访问中立连通性目标，再用同一个代理调度器访问 `https://www.codebuff.com/`。结果会分别显示“代理连接”和“Freebuff 访问”的成功、HTTP 状态、延迟或失败原因；第一阶段失败时第二阶段会标记为跳过。收到任意 HTTP 响应只说明该路径到达了目标，不能证明 Token 有效、账号未被封禁或模型可用。
-- **模型测试**会弹出模型选择框，并对所选模型发送一次最短的真实 Freebuff 请求，用于判断该账号和模型实际能否工作。为避免替换正在服务的 Freebuff session，它只允许对**已停用账号**运行。它会报告脱敏后的响应摘要、HTTP 状态、延迟、封禁标记及诊断码，例如 `FREEBUFF_BANNED`、`MODEL_QUOTA_EXHAUSTED`、`MODEL_TOKEN_INVALID` 或 `MODEL_SESSION_MISMATCH`。测试优先复用同模型的现有 session；没有可复用 session 时会创建一个新 session，因此**可能计入上游 session 额度**。测试结束会清理本次新建的 session，但这不会保证上游撤销已经计入的额度，请不要对真实账号反复点击。
+- **模型测试**会弹出模型选择框，并对所选模型发送一次最短的真实 Freebuff 请求，用于判断该账号和模型实际能否工作。为避免替换正在服务的 Freebuff session，它只允许对**已停用或已自动暂停**的账号运行。它会报告脱敏后的响应摘要、HTTP 状态、延迟、封禁标记及诊断码，例如 `FREEBUFF_BANNED`、`MODEL_QUOTA_EXHAUSTED`、`MODEL_TOKEN_INVALID` 或 `MODEL_SESSION_MISMATCH`。测试优先复用同模型的现有 session；没有可复用 session 时会创建一个新 session，因此**可能计入上游 session 额度**。测试结束会清理本次新建的 session，但这不会保证上游撤销已经计入的额度，请不要对真实账号反复点击。
 
 两个操作都要求已登录的管理员会话；非 GET 请求还需同源 CSRF Token。管理端先通过 `GET /admin/api/test-models` 读取可测试模型，再以 `POST /admin/api/accounts/:id/test-proxy-check` 执行代理测试，或以 `POST /admin/api/accounts/:id/test-model` 和 JSON `{"model":"<模型 ID>","confirm":true}` 执行模型测试。`confirm: true` 是服务端强制要求，避免外部脚本或误点无意触发真实模型请求。完整 Docker 管理 API 和返回语义见 [DOCKER.md](DOCKER.md#31-管理端测试)。
 

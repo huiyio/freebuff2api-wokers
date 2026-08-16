@@ -82,6 +82,63 @@ test('account mutations clear token state and expired health stops excluding an 
   );
 });
 
+test('Node observation sink receives only sanitized rate-limit events from the active generation', async () => {
+  const source = await readFile(new URL('../worker.js', import.meta.url), 'utf8');
+  const instrumented = `${source}\nexport { acctHealth, invalidateAccountState, recordAccountObservation, scopedAccountKey };\n`;
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(instrumented).toString('base64')}`;
+  const internals = await import(moduleUrl);
+  const token = 'observation-sink-token-12345';
+  const observed = [];
+
+  internals.setAccountObservationSink((event) => observed.push(event));
+  try {
+    internals.invalidateAccountState([], token, '7');
+    internals.recordAccountObservation(token, 429, {
+      status: 'temporary_error',
+      upstreamBodySecret: 'must-not-leave-worker',
+      uid: 'upstream-uid',
+    }, {
+      retryAfterMs: 1250,
+      quota: { remaining: 0 },
+    }, '7');
+    assert.deepEqual(observed, [{
+      token,
+      generation: '7',
+      state: 'rate_limited',
+      httpStatus: 429,
+      retryAfterMs: 1250,
+    }]);
+    assert.deepEqual(Object.keys(observed[0]).sort(), ['generation', 'httpStatus', 'retryAfterMs', 'state', 'token']);
+    assert.doesNotMatch(JSON.stringify(observed), /must-not-leave-worker|upstream-uid|remaining/);
+
+    internals.recordAccountObservation(token, 403, { status: 'banned' }, {}, '7');
+    assert.equal(observed.length, 1);
+
+    internals.invalidateAccountState([], token, '8');
+    internals.recordAccountObservation(token, 429, { status: 'rate_limited' }, {}, '7');
+    assert.equal(observed.length, 1);
+
+    internals.recordAccountObservation(token, 503, {
+      status: 'temporary_error',
+      state: 'rate_limited',
+      upstreamBodySecret: 'must-not-leave-worker-either',
+    }, { retryAfterMs: -1 }, '8');
+    assert.deepEqual(observed[1], {
+      token,
+      generation: '8',
+      state: 'rate_limited',
+      httpStatus: 503,
+      retryAfterMs: null,
+    });
+
+    internals.setAccountObservationSink(() => { throw new Error('sink failure'); });
+    internals.recordAccountObservation(token, 429, { status: 'rate_limited' }, {}, '8');
+    assert.equal(internals.acctHealth.get(internals.scopedAccountKey(token, '8')).state, 'rate_limited');
+  } finally {
+    internals.setAccountObservationSink(null);
+  }
+});
+
 test('cached sessions do not bypass an account cooldown', async () => {
   const source = await readFile(new URL('../worker.js', import.meta.url), 'utf8');
   const instrumented = `${source}\nexport { cooldowns, pickToken, sessCache, scopedAccountKey, scopedCacheKey };\n`;

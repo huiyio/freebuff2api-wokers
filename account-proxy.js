@@ -18,6 +18,7 @@ const TIMEOUT_NETWORK_CODES = new Set([
   'UND_ERR_CONNECT_TIMEOUT',
   'UND_ERR_HEADERS_TIMEOUT',
 ]);
+const DEFAULT_CODEBUFF_API = 'https://www.codebuff.com';
 
 export class AccountProxyConfigError extends Error {
   constructor(message) {
@@ -521,6 +522,138 @@ export async function probeAccountProxyStages(account, options = {}) {
     };
   } finally {
     try { await created?.dispatcher.close?.(); } catch {}
+  }
+}
+
+function boundedRetryAfterMs(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.min(Math.round(parsed), 6 * 60 * 60 * 1000);
+}
+
+function retryAfterFromResponse(response, payload) {
+  const fromPayload = boundedRetryAfterMs(payload?.retryAfterMs);
+  if (fromPayload) return fromPayload;
+
+  const retryAfter = response.headers.get('retry-after');
+  if (!retryAfter) return null;
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds > 0) return boundedRetryAfterMs(seconds * 1000);
+  const retryAt = Date.parse(retryAfter);
+  return Number.isFinite(retryAt) ? boundedRetryAfterMs(retryAt - Date.now()) : null;
+}
+
+// The session endpoint is Freebuff's documented read-only account check. It
+// intentionally does not create a session or send a model request. A dedicated
+// router keeps this probe on the account's configured proxy without relying on
+// the process-wide fetch router or falling back to a direct request.
+export async function probeAccountRecovery(account, options = {}) {
+  if (!account?.token || !account?.tokenEntry) {
+    throw new AccountProxyConfigError('account recovery probe requires a token route');
+  }
+  const connectTimeoutMs = options.connectTimeoutMs ?? 10000;
+  const upstreamBaseUrl = options.upstreamBaseUrl || DEFAULT_CODEBUFF_API;
+  const fetchImpl = options.fetchImpl || undiciFetch;
+  const startedAt = Date.now();
+  let router = null;
+
+  try {
+    const endpoint = new URL('/api/v1/freebuff/session', upstreamBaseUrl).toString();
+    router = createAccountProxyRouter([account], {
+      requireProxy: options.requireProxy === undefined
+        ? Boolean(account.proxyRequired)
+        : Boolean(options.requireProxy),
+      protectedHosts: options.protectedHosts,
+      connectTimeoutMs,
+      fetchImpl,
+    });
+    const response = await router.fetch(endpoint, {
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${account.token}`,
+        'x-freebuff-include-unused-rate-limits': '1',
+      },
+      signal: AbortSignal.timeout(connectTimeoutMs),
+    });
+    const text = await response.text();
+    let payload = null;
+    try { payload = text ? JSON.parse(text) : null; } catch {}
+    const upstreamState = typeof payload?.status === 'string'
+      ? payload.status
+      : typeof payload?.state === 'string' ? payload.state : null;
+    const retryAfterMs = retryAfterFromResponse(response, payload);
+    const result = {
+      ok: false,
+      recovered: false,
+      state: 'unknown',
+      httpStatus: response.status,
+      latencyMs: Date.now() - startedAt,
+      retryAfterMs,
+      message: 'Freebuff returned an unrecognized recovery response',
+    };
+
+    if (response.status === 429 || upstreamState === 'rate_limited') {
+      return {
+        ...result,
+        state: 'rate_limited',
+        message: 'Freebuff still reports this account as rate limited',
+      };
+    }
+    if (response.status === 401) {
+      return { ...result, state: 'token_invalid', message: 'Freebuff rejected this account token' };
+    }
+    if (response.status === 403) {
+      const state = upstreamState === 'banned'
+        ? 'banned'
+        : upstreamState === 'country_blocked' ? 'country_blocked' : 'blocked';
+      return { ...result, state, message: `Freebuff denied this account (${state})` };
+    }
+    if (response.status >= 500) {
+      return { ...result, state: 'upstream_error', message: `Freebuff recovery check returned HTTP ${response.status}` };
+    }
+    if (['model_locked', 'ip_capped'].includes(upstreamState)) {
+      return { ...result, state: upstreamState, message: `Freebuff recovery check is not ready (${upstreamState})` };
+    }
+    // Freebuff returns 404 when the token is valid but has no active session.
+    // A 2xx session state is equally valid unless it explicitly says otherwise.
+    if ((response.status >= 200 && response.status < 300) || response.status === 404) {
+      return {
+        ...result,
+        ok: true,
+        recovered: true,
+        state: 'recovered',
+        message: response.status === 404
+          ? 'Freebuff accepted the account; no active session is present'
+          : 'Freebuff accepted the account',
+      };
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof AccountProxyConfigError) {
+      return {
+        ok: false,
+        recovered: false,
+        state: 'proxy_unavailable',
+        code: 'ACCOUNT_PROXY_REQUIRED',
+        latencyMs: Date.now() - startedAt,
+        retryAfterMs: null,
+        message: 'account proxy routing is unavailable for the recovery check',
+      };
+    }
+    const safe = error instanceof AccountProxyRequestError
+      ? error
+      : sanitizedConnectionError(error, account.proxy ? 'proxy' : 'direct');
+    return {
+      ok: false,
+      recovered: false,
+      state: safe.code === 'ACCOUNT_PROXY_REQUIRED' ? 'proxy_unavailable' : 'network_error',
+      code: safe.code,
+      latencyMs: Date.now() - startedAt,
+      retryAfterMs: null,
+      message: safe.message,
+    };
+  } finally {
+    try { await router?.close?.(); } catch {}
   }
 }
 

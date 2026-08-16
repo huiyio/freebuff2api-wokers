@@ -5,12 +5,28 @@ import {
   normalizeTokenEntry,
   probeAccountProxyStages,
   probeAccountConnection,
+  probeAccountRecovery,
 } from './account-proxy.js';
 import {
   AdminModelTestError,
   listTestModels,
   testAccountModel,
 } from './admin-model-tester.js';
+
+const DEFAULT_RECOVERY_INTERVAL_MS = 5 * 60 * 1000;
+
+function recoveryProbeAt(now, retryAfterMs = null) {
+  const hintedDelay = Number.isFinite(retryAfterMs) && retryAfterMs > 0
+    ? Math.min(Math.round(retryAfterMs), 6 * 60 * 60 * 1000)
+    : 0;
+  return new Date(now.getTime() + Math.max(DEFAULT_RECOVERY_INTERVAL_MS, hintedDelay)).toISOString();
+}
+
+function recoveryResultMessage(result, token) {
+  const text = String(result?.message || 'recovery probe did not return a result');
+  const secret = String(token || '');
+  return (secret ? text.replaceAll(secret, '[redacted]') : text).slice(0, 240);
+}
 
 export class AccountServiceError extends Error {
   constructor(message, status = 400, code = 'ACCOUNT_INVALID') {
@@ -165,6 +181,7 @@ export class AccountRuntime {
       tokenLines: [],
       tokenString: '',
       managedAccountIds: [],
+      managedAccountTokens: [],
       stats: null,
     });
   }
@@ -175,13 +192,16 @@ export class AccountRuntime {
   }
 
   #buildSnapshot() {
-    const managed = this.#managedAccounts().filter((account) => account.enabled !== false);
+    const managed = this.#managedAccounts().filter((account) => (
+      account.enabled !== false && account.effectiveEnabled !== false
+    ));
     const managedRoutes = managed.map(accountRoute);
     const routes = [...managedRoutes, ...this.environmentAccounts];
     return {
       routes,
       tokenLines: routes.map((route) => route.tokenEntry),
       managedAccountIds: managed.map((account) => account.id).filter(Boolean),
+      managedAccountTokens: managedRoutes.map((route) => route.token),
     };
   }
 
@@ -195,6 +215,7 @@ export class AccountRuntime {
       tokenLines,
       tokenString: tokenLines.join(','),
       managedAccountIds: Object.freeze([...next.managedAccountIds]),
+      managedAccountTokens: Object.freeze([...next.managedAccountTokens]),
       stats: Object.freeze({ ...this.proxyManager.stats }),
     });
     return this.snapshot;
@@ -211,6 +232,7 @@ export class AccountRuntime {
       tokenLines,
       tokenString: tokenLines.join(','),
       managedAccountIds: Object.freeze([...next.managedAccountIds]),
+      managedAccountTokens: Object.freeze([...next.managedAccountTokens]),
       stats: Object.freeze({ ...stats }),
     });
     this.accountStateInvalidator?.(invalidateTokens, this.tokenString, this.snapshot.generation);
@@ -219,6 +241,12 @@ export class AccountRuntime {
 
   get tokenString() {
     return this.snapshot.tokenString;
+  }
+
+  activeManagedAccountIdForToken(token, generation) {
+    if (String(generation) !== String(this.snapshot.generation)) return null;
+    const index = this.snapshot.managedAccountTokens.indexOf(String(token || '').trim());
+    return index >= 0 ? this.snapshot.managedAccountIds[index] || null : null;
   }
 
   runWithCurrentProxySnapshot(operation) {
@@ -257,6 +285,8 @@ export class AccountService {
     connectTimeoutMs = 10000,
     modelTester = testAccountModel,
     modelCatalog = listTestModels,
+    recoveryProbe = probeAccountRecovery,
+    upstreamBaseUrl,
   }) {
     this.store = store;
     this.runtime = runtime;
@@ -264,6 +294,8 @@ export class AccountService {
     this.connectTimeoutMs = connectTimeoutMs;
     this.modelTester = modelTester;
     this.modelCatalog = modelCatalog;
+    this.recoveryProbe = recoveryProbe;
+    this.upstreamBaseUrl = upstreamBaseUrl;
     this.mutationChain = Promise.resolve();
   }
 
@@ -312,6 +344,96 @@ export class AccountService {
     return { result, account: updated };
   }
 
+  observeRateLimit({ token, generation, retryAfterMs = null } = {}) {
+    const normalizedToken = String(token || '').trim();
+    if (!normalizedToken) return Promise.resolve({ changed: false, ignored: 'missing_token' });
+    return this.#exclusive(async () => {
+      // A Worker request may finish after an account edit/reload. Only the
+      // currently active generation is allowed to pause a managed account.
+      const accountId = this.runtime.activeManagedAccountIdForToken(normalizedToken, generation);
+      if (!accountId) return { changed: false, ignored: 'stale_or_unmanaged' };
+      const account = this.store.getAccount(accountId);
+      if (!account?.enabled || account.autoPaused) return { changed: false, ignored: 'not_effective' };
+
+      const observedAt = new Date();
+      const paused = this.store.pauseAccountForRateLimit(accountId, {
+        observedAt,
+        nextProbeAt: recoveryProbeAt(observedAt, retryAfterMs),
+        message: 'Freebuff returned a rate-limited response; automatic recovery is scheduled',
+      });
+      if (!paused.changed) return paused;
+
+      this.runtime.reload({ invalidateTokens: [normalizedToken] });
+      this.store.appendAudit({
+        actor: 'system',
+        action: 'account.rate_limit_paused',
+        accountId,
+        summary: `Automatically paused ${account.name} after a Freebuff rate limit`,
+      });
+      return paused;
+    });
+  }
+
+  async runRecoveryProbes({ owner, now = new Date(), leaseMs = 60000, limit = 1 } = {}) {
+    const claimed = this.store.claimDueRecoveryProbes(now, owner, leaseMs, limit);
+    const outcomes = [];
+    for (const account of claimed) {
+      const route = accountRoute(account);
+      const token = route.token;
+      let result;
+      try {
+        result = await this.recoveryProbe(route, {
+          connectTimeoutMs: this.connectTimeoutMs,
+          requireProxy: this.requireProxy,
+          protectedHosts: this.runtime.options.protectedHosts,
+          upstreamBaseUrl: this.upstreamBaseUrl,
+        });
+      } catch {
+        result = {
+          recovered: false,
+          state: 'probe_error',
+          message: 'The recovery probe could not complete',
+          retryAfterMs: null,
+        };
+      }
+
+      const checkedAt = new Date();
+      const recovered = result?.recovered === true && result?.state === 'recovered';
+      const outcome = await this.#exclusive(async () => {
+        const input = {
+          owner,
+          revision: account.stateRevision,
+          state: result?.state || 'unknown',
+          message: recoveryResultMessage(result, token),
+          checkedAt,
+        };
+        const finished = recovered
+          ? this.store.completeRecoveryProbe(account.id, input)
+          : this.store.keepRecoveryPaused(account.id, {
+              ...input,
+              nextProbeAt: recoveryProbeAt(checkedAt, result?.retryAfterMs),
+            });
+        if (finished.changed && recovered) {
+          this.runtime.reload({ invalidateTokens: [token] });
+          this.store.appendAudit({
+            actor: 'system',
+            action: 'account.rate_limit_recovered',
+            accountId: account.id,
+            summary: `Automatically restored ${account.name} after Freebuff recovery check`,
+          });
+        }
+        return finished;
+      });
+      outcomes.push({
+        accountId: account.id,
+        changed: outcome.changed,
+        recovered: recovered && outcome.changed,
+        state: result?.state || 'unknown',
+      });
+    }
+    return outcomes;
+  }
+
   list(accountDetails = []) {
     const health = this.runtime.mapHealth(accountDetails);
     return this.store.listAccounts().map((account) => {
@@ -320,10 +442,12 @@ export class AccountService {
         ...account,
         canTestConnection: account.hasProxy || (!this.requireProxy && !account.proxyRequired),
         canTestProxy: account.hasProxy,
-        canTestModel: !account.enabled && (account.hasProxy || (!this.requireProxy && !account.proxyRequired)),
+        canTestModel: !account.effectiveEnabled && (account.hasProxy || (!this.requireProxy && !account.proxyRequired)),
         connectionTestMode: account.hasProxy ? 'proxy' : 'direct',
-        upstreamAlive: account.enabled ? observation?.alive ?? null : null,
-        upstreamState: account.enabled ? observation?.state || 'unknown' : 'disabled',
+        upstreamAlive: account.effectiveEnabled ? observation?.alive ?? null : account.autoPaused ? false : null,
+        upstreamState: !account.enabled
+          ? 'disabled'
+          : account.autoPaused ? account.autoPauseReason : observation?.state || 'unknown',
       };
     });
   }
@@ -531,7 +655,7 @@ export class AccountService {
         const account = this.get(id, { includeSecrets: true });
         // The upstream session endpoint can replace an active live session.
         // Keep real probes isolated from accounts currently serving traffic.
-        if (account.enabled) {
+        if (account.effectiveEnabled) {
           throw new AccountServiceError(
             'disable this account before running a model test to avoid interrupting live Freebuff sessions',
             409,

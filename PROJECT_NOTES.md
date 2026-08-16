@@ -29,7 +29,16 @@
   -> 流式转发或聚合为非流式响应
 ```
 
-## 1.1 1.8.9-admin.5：代理测试与模型测试拆分
+## 1.1 未发布：429 自动暂停与恢复
+
+- 仅 Node 管理模式新增持久化 `autoPaused` 状态。管理员的 `enabled` 仍表示希望启用；实际进入运行池的条件为 `enabled && !autoPaused`。因此 HTTP `429` 或明确 `rate_limited` 会马上移除该账号，但不会把管理员意愿改成停用。
+- 数据库迁移 `002_account_auto_pause.sql` 将 schema 从 v1 升到 v2，保存暂停原因、下次/最近探测、探测结果、尝试数、CAS 版本和短租约。旧数据库原地迁移，不读取或输出已加密的 Token/完整代理 URL。
+- `worker.js` 仅把真实上游限流事件的 Token、账号代次和 `retryAfterMs` 传给 Node 内部回调；不传上游正文、uid 或额度快照。代次失配和环境变量账号都会被忽略。
+- `account-recovery-monitor.js` 默认每 5 分钟领取已到期的暂停记录，并使用该账号自己的代理发送只读 `GET /api/v1/freebuff/session`，不创建 session 或模型请求。只有 2xx 或 404 的明确可用状态会恢复；429、网络/代理错误、5xx、401、403、封禁和地区限制均保持暂停。手动停用或编辑账号会使在途探测的 CAS 结果失效。
+- 管理页显示“限流暂停/等待恢复”、下一次检查和上次结果；自动暂停账号不在流量池时可安全使用模型测试。当前改动尚未发布镜像或部署到云服务器。
+- 本地 `npm.cmd run check` 与 `npm.cmd test` 已通过（97/97）；包括 v1 加密账号数据库迁移、重复 429 幂等、运行池剔除/恢复、代理绑定探测、手动停用竞态、调度器防重入和 Worker 事件脱敏。未用真实账号验证上游恢复语义。
+
+## 1.2 1.8.9-admin.5：代理测试与模型测试拆分
 
 - 账号操作已拆成“代理测试”和“模型测试”。代理测试必须使用该账号的代理，依次验证代理连接和经同一代理访问 Freebuff；它不携带 Token、不创建 session，也不能证明账号或模型可用。
 - 模型测试在弹窗选择 `freebuff-models.json` 中的模型，服务端要求 `confirm: true` 后才向指定账号发送一条最短真实请求。为避免替换活跃 session，它只允许已停用账号运行。结果只返回脱敏摘要、阶段、HTTP 状态、延迟、封禁标记和稳定诊断码。
@@ -37,7 +46,7 @@
 - 本地 `npm.cmd run check`、`npm.cmd test`（86/86）和 `npm.cmd audit --omit=dev` 已通过。没有对真实 Freebuff 账号执行模型测试，也没有从 SQLite 读取或输出 Token。
 - GitHub 分支提交 `b06b969` 与标签 `v1.8.9-admin.5` 已推送；GitHub Actions Run `31930472641` 成功发布了 GHCR 多架构索引 `sha256:428724656e0e5447914d009474b21e4c7954645f041f56c4d6cf5274b105c31f`。非 Docker 云服务器已原子切换到 `/opt/freebuff2api/releases/b06b969004151a0733052cc60b921f7c35c9154f`，旧 `195d575` release 保留；备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260816T062121Z` 与对应环境文件。远端 86/86 测试、systemd、管理页模型测试标记、健康 200 和未授权 models 401 均通过。
 
-## 1.2 代理测试延迟结果弹窗
+## 1.3 代理测试延迟结果弹窗
 
 - 提交 `0396a3a` 将代理测试改为持久结果弹窗，分别显示代理连接阶段延迟、经同一代理访问 Freebuff 的延迟、两阶段 HTTP 状态和总耗时；完成 Toast 也保留三项延迟摘要。关闭弹窗会取消仍在进行的浏览器请求，结果不写入 Token、完整代理 URL 或代理密码。
 - 缺少代理时的代理/连接测试仍返回 `400 ACCOUNT_PROXY_MISSING`，但现在会先记录失败状态、原因和时间到账号的“最近连接测试”；模型测试仍只写独立审计记录，不冒充连接测试。
@@ -52,6 +61,7 @@
 - `server.js`：Node HTTP 运行时；加载管理账号或兼容环境账号，把请求转给 Worker，并包装代理路由。
 - `account-proxy.js`：账号配置解析、HTTP/HTTPS/SOCKS5 路由和严格代理失败策略。
 - `account-manager.js`：账号生命周期、健康状态、代理热加载和运行时快照。
+- `account-recovery-monitor.js`：已暂停账号的持久化 5 分钟恢复调度、租约和关闭生命周期。
 - `account-store.js`：SQLite schema、账号/审计/设置持久化。
 - `credential-vault.js`：AES-256-GCM 加密 Token/完整代理 URL 和主密钥校验。
 - `admin-auth.js`：scrypt 管理员密码、会话 Cookie、登录限流。

@@ -16,6 +16,7 @@ import {
   normalizeTokenEntry,
   parseProtectedHosts,
   probeAccountConnection,
+  probeAccountRecovery,
   probeAccountProxyStages,
 } from '../account-proxy.js';
 
@@ -139,6 +140,56 @@ test('treats proxy authentication and upstream 5xx responses as failed proxy tes
   assert.equal(upstreamFailed.stages.freebuff.httpStatus, 503);
   assert.equal(upstreamFailed.stages.freebuff.code, 'FREEBUFF_TARGET_REJECTED');
   assert.deepEqual(seen, ['https://proxy-status.test/', 'https://freebuff-status.test/']);
+});
+
+test('checks a suspended account through its configured proxy without creating a session', async () => {
+  const account = createAccountRoute({
+    token: TOKEN_A,
+    source: 'recovery-account',
+    proxyUrl: 'http://127.0.0.1:18083',
+    proxyRequired: true,
+  });
+  const seen = [];
+  const recovered = await probeAccountRecovery(account, {
+    upstreamBaseUrl: 'https://recovery.test/base-path-is-ignored',
+    fetchImpl: async (url, init) => {
+      seen.push({ url, init });
+      return new Response('', { status: 404 });
+    },
+  });
+  assert.equal(recovered.recovered, true);
+  assert.equal(recovered.state, 'recovered');
+  assert.equal(recovered.httpStatus, 404);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].url, 'https://recovery.test/api/v1/freebuff/session');
+  assert.equal(seen[0].init.method, 'GET');
+  assert.ok(seen[0].init.dispatcher);
+  assert.equal(new Headers(seen[0].init.headers).get('authorization'), `Bearer ${TOKEN_A}`);
+  assert.equal(new Headers(seen[0].init.headers).get('x-freebuff-include-unused-rate-limits'), '1');
+
+  const limited = await probeAccountRecovery(account, {
+    fetchImpl: async () => Response.json({ status: 'rate_limited', retryAfterMs: 12345 }, { status: 429 }),
+  });
+  assert.equal(limited.recovered, false);
+  assert.equal(limited.state, 'rate_limited');
+  assert.equal(limited.retryAfterMs, 12345);
+
+  const banned = await probeAccountRecovery(account, {
+    fetchImpl: async () => Response.json({ status: 'banned' }, { status: 403 }),
+  });
+  assert.equal(banned.recovered, false);
+  assert.equal(banned.state, 'banned');
+});
+
+test('keeps a recovery probe fail-closed when strict proxy routing is unavailable', async () => {
+  const account = createAccountRoute({ token: TOKEN_A, source: 'strict-recovery-account' });
+  const result = await probeAccountRecovery(account, {
+    requireProxy: true,
+    fetchImpl: async () => { throw new Error('direct fallback must not run'); },
+  });
+  assert.equal(result.recovered, false);
+  assert.equal(result.state, 'proxy_unavailable');
+  assert.equal(result.code, 'ACCOUNT_PROXY_REQUIRED');
 });
 
 test('pins one proxy router generation for the full async operation', async () => {

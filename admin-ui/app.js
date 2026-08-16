@@ -242,6 +242,10 @@ async function initialize() {
 
 function statusBadge(account) {
   if (!account.enabled) return '<span class="status-badge status-neutral">已停用</span>';
+  if (account.autoPaused && account.autoPauseReason === 'rate_limited') {
+    return '<span class="status-badge status-warning">限流暂停</span>';
+  }
+  if (account.autoPaused) return '<span class="status-badge status-warning">自动暂停</span>';
   if (account.upstreamState === 'banned') return '<span class="status-badge status-error">已封禁</span>';
   if (account.lastProxyStatus === 'error') return '<span class="status-badge status-error">连接异常</span>';
   if (account.lastProxyStatus === 'ok') return '<span class="status-badge status-ok">运行中</span>';
@@ -251,10 +255,39 @@ function statusBadge(account) {
 function upstreamBadge(account) {
   const stateValue = account.upstreamState || 'unknown';
   if (!account.enabled) return '<span class="status-badge status-neutral">未加载</span>';
+  if (account.autoPaused && account.autoPauseReason === 'rate_limited') {
+    return '<span class="status-badge status-warning">等待恢复</span>';
+  }
   if (stateValue === 'banned') return '<span class="status-badge status-error">banned</span>';
   if (account.upstreamAlive === true) return '<span class="status-badge status-ok">正常</span>';
   if (account.upstreamAlive === false) return `<span class="status-badge status-error">${escapeHtml(stateValue)}</span>`;
   return '<span class="status-badge status-neutral">未知</span>';
+}
+
+function recoveryStateLabel(value) {
+  const labels = {
+    probing: '正在检查',
+    rate_limited: '仍被限流',
+    recovered: '已恢复',
+    token_invalid: 'Token 无效',
+    banned: '已封禁',
+    country_blocked: '地区受限',
+    blocked: '访问被拒',
+    proxy_unavailable: '代理不可用',
+    network_error: '网络异常',
+    upstream_error: '上游异常',
+    model_locked: '会话锁定',
+    ip_capped: 'IP 已达上限',
+    probe_error: '检查失败',
+  };
+  return labels[value] || '等待检查';
+}
+
+function recoveryDetail(account) {
+  if (!account.autoPaused) return '';
+  const next = formatTime(account.nextRecoveryProbeAt);
+  const previous = recoveryStateLabel(account.lastRecoveryState);
+  return `<span class="account-email">${escapeHtml(`下次检查 ${next} · 上次 ${previous}`)}</span>`;
 }
 
 function filteredAccounts() {
@@ -262,10 +295,11 @@ function filteredAccounts() {
   const filter = $('#account-filter').value;
   return state.accounts.filter((account) => {
     const matchesText = !query || `${account.name} ${account.email}`.toLowerCase().includes(query);
-    const hasError = account.lastProxyStatus === 'error' || account.upstreamState === 'banned' || account.upstreamAlive === false;
+    const hasError = account.autoPaused || account.lastProxyStatus === 'error' || account.upstreamState === 'banned' || account.upstreamAlive === false;
     const matchesFilter = filter === 'all'
-      || (filter === 'enabled' && account.enabled)
+      || (filter === 'enabled' && account.effectiveEnabled)
       || (filter === 'disabled' && !account.enabled)
+      || (filter === 'paused' && account.autoPaused)
       || (filter === 'error' && hasError);
     return matchesText && matchesFilter;
   });
@@ -273,12 +307,13 @@ function filteredAccounts() {
 
 function renderMetrics() {
   const errors = state.accounts.filter((account) => (
-    account.lastProxyStatus === 'error'
+    account.autoPaused
+    || account.lastProxyStatus === 'error'
     || account.upstreamState === 'banned'
     || account.upstreamAlive === false
   )).length;
   $('#metric-total').textContent = state.accounts.length;
-  $('#metric-enabled').textContent = state.accounts.filter((account) => account.enabled).length;
+  $('#metric-enabled').textContent = state.accounts.filter((account) => account.effectiveEnabled).length;
   $('#metric-proxy-ok').textContent = state.accounts.filter((account) => account.lastProxyStatus === 'ok').length;
   $('#metric-errors').textContent = errors;
 }
@@ -293,14 +328,14 @@ function renderAccounts() {
     const proxyTitle = canTestProxy
       ? '先测试代理连接，再测试通过代理访问 Freebuff'
       : '尚未配置代理；点击查看配置提示';
-    const modelTitle = account.enabled
+    const modelTitle = account.effectiveEnabled
       ? '请先停用账号，避免中断正在使用的 Freebuff 会话'
       : canTestModel
         ? '选择模型并发送一次最短真实请求'
         : '当前策略要求先配置代理；点击查看配置提示';
     return `
     <tr data-account-id="${escapeHtml(account.id)}">
-      <td data-label="状态">${statusBadge(account)}</td>
+      <td data-label="状态">${statusBadge(account)}${recoveryDetail(account)}</td>
       <td data-label="账号">
         <span class="account-name">${escapeHtml(account.name)}</span>
         <span class="account-email">${escapeHtml(account.email || '-')}</span>
@@ -318,7 +353,7 @@ function renderAccounts() {
         <div class="action-group">
           <button class="table-action" type="button" data-action="proxy-test" title="${escapeHtml(proxyTitle)}" aria-label="${escapeHtml(proxyTitle)}">代理测试</button>
           <button class="table-action model-test-action" type="button" data-action="model-test" title="${escapeHtml(modelTitle)}" aria-label="${escapeHtml(modelTitle)}">模型测试</button>
-          <button class="table-action" type="button" data-action="toggle">${account.enabled ? '停用' : '启用'}</button>
+          <button class="table-action" type="button" data-action="toggle" title="${account.autoPaused ? '手动停用会取消自动恢复任务' : ''}">${account.enabled ? '停用' : '启用'}</button>
           <button class="table-action" type="button" data-action="edit">编辑</button>
           <button class="table-action destructive" type="button" data-action="delete">删除</button>
         </div>
@@ -1170,7 +1205,7 @@ function openModelTestDialog(account) {
   $('#model-test-submit').disabled = !canTestModel;
   $('#model-test-submit').textContent = '开始测试';
   if (!canTestModel) {
-    $('#model-test-status').textContent = account.enabled
+    $('#model-test-status').textContent = account.effectiveEnabled
       ? '请先停用账号，再执行模型测试，避免中断正在使用的 Freebuff 会话。'
       : '当前账号未配置代理，且当前策略要求账号通过代理访问 Freebuff。';
     $('#model-test-status').className = 'authorization-status result-danger';
