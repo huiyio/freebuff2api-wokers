@@ -20,7 +20,7 @@
 
 仓库不发布 `latest`。生产应固定版本标签、`sha-*` 标签，或进一步固定 Actions 输出的镜像 digest。
 
-当前推荐版本为 `1.8.9-admin.5`。对应 Git tag 会触发 GitHub Actions 多架构构建；在构建完成前不要假设 digest，完成后应从 Actions 输出复制实际 digest。`1.8.9-admin.4` 的已验证回退 digest 为 `sha256:3f99c7d38fde3eb06aaa831988031fe4ea51cde2c564911637e778e55814e73c`。截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取：
+当前推荐版本为 `1.8.9-admin.5`。GitHub Actions Run `31930472641` 已成功；多架构镜像索引 digest 为 `sha256:428724656e0e5447914d009474b21e4c7954645f041f56c4d6cf5274b105c31f`（`linux/amd64`、`linux/arm64`）。`1.8.9-admin.4` 的已验证回退 digest 为 `sha256:3f99c7d38fde3eb06aaa831988031fe4ea51cde2c564911637e778e55814e73c`。截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取：
 
 ```bash
 docker pull ghcr.io/huiyio/freebuff2api-wokers:1.8.9-admin.5

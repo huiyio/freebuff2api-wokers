@@ -160,7 +160,7 @@ ghcr.io/huiyio/freebuff2api-wokers
 
 当前 Compose 默认固定不可变版本 `1.8.9-admin.5`，支持 `linux/amd64` 和 `linux/arm64`。仓库不发布 `latest`；升级和回滚应使用版本标签、`sha-<提交前12位>` 标签或镜像 digest。可变的 `branch-codex-per-account-proxy` 只用于临时试用。
 
-截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取。`1.8.9-admin.5` 由对应 Git tag 的 Actions 版本构建发布，构建完成后应在 Actions 日志中记录并使用实际多架构 digest；上一版 `1.8.9-admin.4` 的已验证 digest 为 `sha256:3f99c7d38fde3eb06aaa831988031fe4ea51cde2c564911637e778e55814e73c`。如果后续可见性改变，私有包才需要 `read:packages` PAT 登录，且不要把 PAT 写入配置或日志。
+截至 2026-08-16，GHCR Package 已验证为 Public，可直接拉取。`1.8.9-admin.5` 的 GitHub Actions Run `31930472641` 已成功，多架构镜像索引 digest 为 `sha256:428724656e0e5447914d009474b21e4c7954645f041f56c4d6cf5274b105c31f`（`linux/amd64`、`linux/arm64`）；上一版 `1.8.9-admin.4` 的已验证 digest 为 `sha256:3f99c7d38fde3eb06aaa831988031fe4ea51cde2c564911637e778e55814e73c`。如果后续可见性改变，私有包才需要 `read:packages` PAT 登录，且不要把 PAT 写入配置或日志。
 
 #### 直接使用 GitHub 构建镜像
 

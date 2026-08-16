@@ -35,6 +35,7 @@
 - 模型测试在弹窗选择 `freebuff-models.json` 中的模型，服务端要求 `confirm: true` 后才向指定账号发送一条最短真实请求。为避免替换活跃 session，它只允许已停用账号运行。结果只返回脱敏摘要、阶段、HTTP 状态、延迟、封禁标记和稳定诊断码。
 - 当全局或账号策略要求代理而账号未配置代理时，外层两个按钮仍可点击以显示明确的配置状态；模型测试弹窗会阻止提交，接口也会返回 `ACCOUNT_PROXY_MISSING`。当策略允许直连时，已停用账号的模型测试可直连运行。
 - 本地 `npm.cmd run check`、`npm.cmd test`（86/86）和 `npm.cmd audit --omit=dev` 已通过。没有对真实 Freebuff 账号执行模型测试，没有从 SQLite 读取或输出 Token，也没有在本次改动中重启线上服务。
+- GitHub 分支提交 `b06b969` 与标签 `v1.8.9-admin.5` 已推送；GitHub Actions Run `31930472641` 成功发布了 GHCR 多架构索引 `sha256:428724656e0e5447914d009474b21e4c7954645f041f56c4d6cf5274b105c31f`。远程 Debian 服务尚未更新，因为本机没有该主机接受的 SSH 密钥。
 
 ## 2. 入口与文件职责
 
