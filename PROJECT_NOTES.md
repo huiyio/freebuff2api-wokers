@@ -35,8 +35,9 @@
 - 数据库迁移 `002_account_auto_pause.sql` 将 schema 从 v1 升到 v2，保存暂停原因、下次/最近探测、探测结果、尝试数、CAS 版本和短租约。旧数据库原地迁移，不读取或输出已加密的 Token/完整代理 URL。
 - `worker.js` 仅把真实上游限流事件的 Token、账号代次和 `retryAfterMs` 传给 Node 内部回调；不传上游正文、uid 或额度快照。代次失配和环境变量账号都会被忽略。
 - `account-recovery-monitor.js` 默认每 5 分钟领取已到期的暂停记录，并使用该账号自己的代理发送只读 `GET /api/v1/freebuff/session`，不创建 session 或模型请求。只有 2xx 或 404 的明确可用状态会恢复；429、网络/代理错误、5xx、401、403、封禁和地区限制均保持暂停。手动停用或编辑账号会使在途探测的 CAS 结果失效。
-- 管理页显示“限流暂停/等待恢复”、下一次检查和上次结果；自动暂停账号不在流量池时可安全使用模型测试。当前改动尚未发布镜像或部署到云服务器。
+- 管理页显示“限流暂停/等待恢复”、下一次检查和上次结果；自动暂停账号不在流量池时可安全使用模型测试。功能已推送到 `fork/codex/per-account-proxy` 并部署到非 Docker 云服务器；GHCR 镜像尚未重新发布。
 - 本地 `npm.cmd run check` 与 `npm.cmd test` 已通过（97/97）；包括 v1 加密账号数据库迁移、重复 429 幂等、运行池剔除/恢复、代理绑定探测、手动停用竞态、调度器防重入和 Worker 事件脱敏。未用真实账号验证上游恢复语义。
+- 提交 `6f38ebc` 已推送并部署：服务器 `/opt/freebuff2api/current -> /opt/freebuff2api/releases/6f38ebc`，旧 release `38d7531625220280ed623e2668f464c255e3b74d` 保留；备份为 `/var/backups/freebuff2api/freebuff.sqlite.20260816T121824Z` 与配套环境文件。远端 `npm ci`、语法检查和 97/97 测试通过，systemd、健康端点、管理页和未授权模型接口验收通过。
 
 ## 1.2 1.8.9-admin.5：代理测试与模型测试拆分
 
